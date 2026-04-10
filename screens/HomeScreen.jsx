@@ -34,6 +34,30 @@ const HomeScreen = ({ navigation }) => {
   const [userData, setUserData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [sendingRequest, setSendingRequest] = useState(false);
+  const [unreadCounts, setUnreadCounts] = useState({});
+
+  // Real-time listener for unread messages count
+  useEffect(() => {
+    if (!auth.currentUser) return;
+
+    const unreadListeners = friends.map(friend => {
+      const chatId = [auth.currentUser.uid, friend.id].sort().join('_');
+      const messagesRef = collection(db, 'chats', chatId, 'messages');
+      // Query messages that are not read and not from current user
+      const q = query(messagesRef, where('read', '==', false), where('userId', '!=', auth.currentUser.uid));
+      
+      return onSnapshot(q, (snapshot) => {
+        setUnreadCounts(prev => ({
+          ...prev,
+          [friend.id]: snapshot.size
+        }));
+      });
+    });
+
+    return () => {
+      unreadListeners.forEach(unsubscribe => unsubscribe && unsubscribe());
+    };
+  }, [friends]);
 
   useEffect(() => {
     loadUserData();
@@ -183,22 +207,35 @@ const HomeScreen = ({ navigation }) => {
     );
   };
 
-  const renderFriend = ({ item }) => (
-    <TouchableOpacity style={styles.friendCard} onPress={() => startChat(item)}>
-      {item.avatarUrl ? (
-        <Image source={{ uri: item.avatarUrl }} style={styles.avatarImage} />
-      ) : (
-        <View style={styles.avatar}>
-          <Text style={styles.avatarText}>{item.username?.[0]?.toUpperCase()}</Text>
+  const renderFriend = ({ item }) => {
+    const unreadCount = unreadCounts[item.id] || 0;
+    
+    return (
+      <TouchableOpacity style={styles.friendCard} onPress={() => startChat(item)}>
+        {item.avatarUrl ? (
+          <Image source={{ uri: item.avatarUrl }} style={styles.avatarImage} />
+        ) : (
+          <View style={styles.avatar}>
+            <Text style={styles.avatarText}>{item.username?.[0]?.toUpperCase()}</Text>
+          </View>
+        )}
+        <View style={styles.friendInfo}>
+          <Text style={styles.friendName}>{item.username}</Text>
+          {unreadCount > 0 && (
+            <Text style={styles.newMessageText}>{unreadCount} new message{unreadCount !== 1 ? 's' : ''}</Text>
+          )}
         </View>
-      )}
-      <View style={styles.friendInfo}>
-        <Text style={styles.friendName}>{item.username}</Text>
-        <Text style={styles.friendEmail}>{item.email}</Text>
-      </View>
-      <Ionicons name="chatbubble-outline" size={24} color="#007AFF" />
-    </TouchableOpacity>
-  );
+        <View style={styles.rightContainer}>
+          {unreadCount > 0 && (
+            <View style={styles.unreadBadge}>
+              <Text style={styles.unreadBadgeText}>{unreadCount}</Text>
+            </View>
+          )}
+          <Ionicons name="chatbubble-outline" size={24} color="#007AFF" />
+        </View>
+      </TouchableOpacity>
+    );
+  };
 
   const renderSearchResult = ({ item }) => (
     <View style={styles.searchResultCard}>
@@ -441,10 +478,29 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: '#000',
   },
-  friendEmail: {
+  newMessageText: {
     fontSize: 12,
-    color: '#999',
+    color: '#007AFF',
+    fontWeight: '500',
     marginTop: 2,
+  },
+  rightContainer: {
+    alignItems: 'flex-end',
+    gap: 8,
+  },
+  unreadBadge: {
+    backgroundColor: '#FF3B30',
+    borderRadius: 12,
+    minWidth: 22,
+    height: 22,
+    paddingHorizontal: 6,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  unreadBadgeText: {
+    color: '#fff',
+    fontSize: 11,
+    fontWeight: 'bold',
   },
   addButton: {
     backgroundColor: '#007AFF',

@@ -13,7 +13,7 @@ import {
   Image,
   ActivityIndicator
 } from 'react-native';
-import { collection, addDoc, query, orderBy, onSnapshot, doc, updateDoc } from 'firebase/firestore';
+import { collection, addDoc, query, orderBy, onSnapshot, doc, updateDoc, setDoc } from 'firebase/firestore';
 import { getStorage, ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import * as ImagePicker from 'expo-image-picker';
 import { auth, db } from '../config/firebase';
@@ -28,17 +28,18 @@ export default function ChatScreen({ navigation, route }) {
   const [otherUserTyping, setOtherUserTyping] = useState(false);
   const [selectedMessage, setSelectedMessage] = useState(null);
   const [sendingImage, setSendingImage] = useState(false);
+  const [showNewMessageDivider, setShowNewMessageDivider] = useState(false);
+  const [firstUnreadMessageId, setFirstUnreadMessageId] = useState(null);
+  const flatListRef = useRef(null);
   const typingTimeoutRef = useRef(null);
   const storage = getStorage();
 
-  // Reactions list
   const reactions = ['👍', '❤️', '😂', '😮', '😢', '🙏', '🎉', '🔥'];
 
   useEffect(() => {
     const chatRoomId = [auth.currentUser.uid, friend.id].sort().join('_');
     setChatId(chatRoomId);
     
-    // Load messages
     const messagesRef = collection(db, 'chats', chatRoomId, 'messages');
     const q = query(messagesRef, orderBy('createdAt', 'desc'));
     
@@ -48,13 +49,30 @@ export default function ChatScreen({ navigation, route }) {
         ...doc.data(),
         createdAt: doc.data().createdAt?.toDate() || new Date(),
       }));
+      
+      // Find unread messages from friend
+      const unreadMessages = messagesList.filter(
+        msg => msg.userId !== auth.currentUser?.uid && !msg.read
+      );
+      const unreadCount = unreadMessages.length;
+      
+      const unreadMessage = unreadMessages[unreadMessages.length - 1];
+      
+      if (unreadMessage && unreadCount > 0) {
+        setFirstUnreadMessageId(unreadMessage.id);
+        setShowNewMessageDivider(true);
+      } else {
+        setFirstUnreadMessageId(null);
+        setShowNewMessageDivider(false);
+      }
+      
       setMessages(messagesList);
     });
     
-    // Typing listener
+    // TYPING INDICATOR LISTENER - listens for friend's typing status
     const typingRef = doc(db, 'typing', chatRoomId);
     const unsubscribeTyping = onSnapshot(typingRef, (docSnap) => {
-      if (docSnap.exists() && docSnap.data()[friend.id]) {
+      if (docSnap.exists() && docSnap.data()[friend.id] === true) {
         setOtherUserTyping(true);
       } else {
         setOtherUserTyping(false);
@@ -68,31 +86,72 @@ export default function ChatScreen({ navigation, route }) {
     };
   }, [friend.id]);
 
-  // Auto-mark messages as read when they appear
+  // Mark all unread messages as read
+  const markAllMessagesAsRead = async () => {
+    if (!chatId) return;
+    
+    const unreadMessages = messages.filter(
+      msg => msg.userId !== auth.currentUser?.uid && !msg.read
+    );
+    
+    if (unreadMessages.length === 0) return;
+    
+    for (const msg of unreadMessages) {
+      const messageRef = doc(db, 'chats', chatId, 'messages', msg.id);
+      await updateDoc(messageRef, { read: true });
+    }
+    
+    setShowNewMessageDivider(false);
+    setFirstUnreadMessageId(null);
+  };
+
   useEffect(() => {
-    messages.forEach(async (message) => {
-      const isMyMessage = message.userId === auth.currentUser?.uid;
-      if (!isMyMessage && !message.read) {
-        const messageRef = doc(db, 'chats', chatId, 'messages', message.id);
-        await updateDoc(messageRef, { read: true });
-      }
-    });
+    if (messages.length > 0 && chatId) {
+      markAllMessagesAsRead();
+    }
   }, [messages, chatId]);
 
-  // Handle typing indicator
+  const handleSendMessage = async () => {
+    if (!newMessage.trim()) return;
+    
+    await markAllMessagesAsRead();
+    
+    const messagesRef = collection(db, 'chats', chatId, 'messages');
+    await addDoc(messagesRef, {
+      text: newMessage,
+      createdAt: new Date(),
+      userId: auth.currentUser.uid,
+      userName: auth.currentUser.email?.split('@')[0],
+      read: false,
+    });
+    setNewMessage('');
+    
+    setTimeout(() => {
+      flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
+    }, 100);
+  };
+
+  // TYPING INDICATOR - updates when user types
   const handleTyping = async (text) => {
     setNewMessage(text);
     
     if (text.length > 0 && !isTyping) {
       setIsTyping(true);
       const typingRef = doc(db, 'typing', chatId);
-      await updateDoc(typingRef, {
-        [auth.currentUser.uid]: true,
-      });
+      
+      // Create the document if it doesn't exist, then update
+      try {
+        await setDoc(typingRef, {
+          [auth.currentUser.uid]: true,
+        }, { merge: true });
+      } catch (error) {
+        console.error('Error setting typing status:', error);
+      }
       
       if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
       typingTimeoutRef.current = setTimeout(async () => {
         setIsTyping(false);
+        const typingRef = doc(db, 'typing', chatId);
         await updateDoc(typingRef, {
           [auth.currentUser.uid]: false,
         });
@@ -106,22 +165,6 @@ export default function ChatScreen({ navigation, route }) {
     }
   };
 
-  // Send text message
-  const sendMessage = async () => {
-    if (!newMessage.trim()) return;
-    
-    const messagesRef = collection(db, 'chats', chatId, 'messages');
-    await addDoc(messagesRef, {
-      text: newMessage,
-      createdAt: new Date(),
-      userId: auth.currentUser.uid,
-      userName: auth.currentUser.email?.split('@')[0],
-      read: false,
-    });
-    setNewMessage('');
-  };
-
-  // Pick image from gallery
   const pickImage = async () => {
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (status !== 'granted') {
@@ -140,7 +183,6 @@ export default function ChatScreen({ navigation, route }) {
     }
   };
 
-  // Take photo with camera
   const takePhoto = async () => {
     const { status } = await ImagePicker.requestCameraPermissionsAsync();
     if (status !== 'granted') {
@@ -158,7 +200,6 @@ export default function ChatScreen({ navigation, route }) {
     }
   };
 
-  // Send image
   const sendImage = async (uri) => {
     setSendingImage(true);
     try {
@@ -183,7 +224,6 @@ export default function ChatScreen({ navigation, route }) {
     }
   };
 
-  // Show image options
   const showImageOptions = () => {
     Alert.alert(
       'Send Image',
@@ -196,67 +236,76 @@ export default function ChatScreen({ navigation, route }) {
     );
   };
 
-  // Add reaction to message
   const addReaction = async (messageId, reaction) => {
     const messageRef = doc(db, 'chats', chatId, 'messages', messageId);
     await updateDoc(messageRef, { reaction });
     setSelectedMessage(null);
   };
 
-  // Render each message
   const renderMessage = ({ item }) => {
     const isMyMessage = item.userId === auth.currentUser?.uid;
+    const isFirstUnread = showNewMessageDivider && item.id === firstUnreadMessageId;
     
     return (
-      <View style={[styles.messageRow, isMyMessage && styles.myMessageRow]}>
-        {!isMyMessage && (
-          <View style={styles.messageAvatarContainer}>
-            {friend?.avatarUrl ? (
-              <Image source={{ uri: friend.avatarUrl }} style={styles.messageAvatar} />
-            ) : (
-              <View style={styles.messageAvatarPlaceholder}>
-                <Text style={styles.messageAvatarText}>{friend?.username?.[0]?.toUpperCase()}</Text>
-              </View>
-            )}
+      <>
+        {isFirstUnread && (
+          <View style={styles.newMessageDivider}>
+            <View style={styles.dividerLine} />
+            <Text style={styles.newMessageText}>📩 New messages</Text>
+            <View style={styles.dividerLine} />
           </View>
         )}
         
-        <TouchableOpacity 
-          style={[styles.messageWrapper, isMyMessage && styles.myMessageWrapper]}
-          onLongPress={() => setSelectedMessage(item)}
-          activeOpacity={0.7}
-          delayLongPress={300}
-        >
-          <View style={[styles.messageBubble, isMyMessage && styles.myMessageBubble]}>
-            {!isMyMessage && (
-              <Text style={styles.userName}>{item.userName}</Text>
-            )}
-            
-            {item.imageUrl ? (
-              <Image source={{ uri: item.imageUrl }} style={styles.messageImage} />
-            ) : (
-              <Text style={[styles.messageText, isMyMessage && styles.myMessageText]}>
-                {item.text}
-              </Text>
-            )}
-            
-            <View style={styles.messageFooter}>
-              <Text style={[styles.timeText, isMyMessage && styles.myTimeText]}>
-                {new Date(item.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-              </Text>
-              {item.reaction && (
-                <Text style={styles.reactionBadge}>{item.reaction}</Text>
-              )}
-              {isMyMessage && item.read && (
-                <Ionicons name="checkmark-done" size={14} color="rgba(255,255,255,0.7)" />
-              )}
-              {isMyMessage && !item.read && (
-                <Ionicons name="checkmark" size={14} color="rgba(255,255,255,0.5)" />
+        <View style={[styles.messageRow, isMyMessage && styles.myMessageRow]}>
+          {!isMyMessage && (
+            <View style={styles.messageAvatarContainer}>
+              {friend?.avatarUrl ? (
+                <Image source={{ uri: friend.avatarUrl }} style={styles.messageAvatar} />
+              ) : (
+                <View style={styles.messageAvatarPlaceholder}>
+                  <Text style={styles.messageAvatarText}>{friend?.username?.[0]?.toUpperCase()}</Text>
+                </View>
               )}
             </View>
-          </View>
-        </TouchableOpacity>
-      </View>
+          )}
+          
+          <TouchableOpacity 
+            style={[styles.messageWrapper, isMyMessage && styles.myMessageWrapper]}
+            onLongPress={() => setSelectedMessage(item)}
+            activeOpacity={0.7}
+            delayLongPress={300}
+          >
+            <View style={[styles.messageBubble, isMyMessage && styles.myMessageBubble]}>
+              {!isMyMessage && (
+                <Text style={styles.userName}>{item.userName}</Text>
+              )}
+              
+              {item.imageUrl ? (
+                <Image source={{ uri: item.imageUrl }} style={styles.messageImage} />
+              ) : (
+                <Text style={[styles.messageText, isMyMessage && styles.myMessageText]}>
+                  {item.text}
+                </Text>
+              )}
+              
+              <View style={styles.messageFooter}>
+                <Text style={[styles.timeText, isMyMessage && styles.myTimeText]}>
+                  {new Date(item.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                </Text>
+                {item.reaction && (
+                  <Text style={styles.reactionBadge}>{item.reaction}</Text>
+                )}
+                {isMyMessage && item.read && (
+                  <Ionicons name="checkmark-done" size={14} color="rgba(255,255,255,0.7)" />
+                )}
+                {isMyMessage && !item.read && (
+                  <Ionicons name="checkmark" size={14} color="rgba(255,255,255,0.5)" />
+                )}
+              </View>
+            </View>
+          </TouchableOpacity>
+        </View>
+      </>
     );
   };
 
@@ -266,7 +315,6 @@ export default function ChatScreen({ navigation, route }) {
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
     >
-      {/* Header with Friend's Avatar */}
       <View style={styles.header}>
         <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
           <Ionicons name="arrow-back" size={24} color="#007AFF" />
@@ -283,7 +331,7 @@ export default function ChatScreen({ navigation, route }) {
           <View style={styles.headerTextContainer}>
             <Text style={styles.headerTitle}>{friend.username}</Text>
             {otherUserTyping && (
-              <Text style={styles.typingStatus}>typing...</Text>
+              <Text style={styles.typingStatus}>✍️ typing...</Text>
             )}
           </View>
         </View>
@@ -293,7 +341,7 @@ export default function ChatScreen({ navigation, route }) {
         </TouchableOpacity>
       </View>
 
-      {/* Typing Indicator */}
+      {/* Typing Indicator Bar */}
       {otherUserTyping && (
         <View style={styles.typingContainer}>
           <View style={styles.typingDots}>
@@ -305,7 +353,6 @@ export default function ChatScreen({ navigation, route }) {
         </View>
       )}
 
-      {/* Sending Image Indicator */}
       {sendingImage && (
         <View style={styles.sendingContainer}>
           <ActivityIndicator size="small" color="#007AFF" />
@@ -313,8 +360,8 @@ export default function ChatScreen({ navigation, route }) {
         </View>
       )}
 
-      {/* Messages List */}
       <FlatList
+        ref={flatListRef}
         data={messages}
         renderItem={renderMessage}
         keyExtractor={(item) => item.id}
@@ -322,7 +369,6 @@ export default function ChatScreen({ navigation, route }) {
         contentContainerStyle={styles.messagesList}
       />
 
-      {/* Input Area */}
       <View style={styles.inputContainer}>
         <TextInput
           style={styles.input}
@@ -334,14 +380,13 @@ export default function ChatScreen({ navigation, route }) {
         />
         <TouchableOpacity 
           style={[styles.sendButton, !newMessage.trim() && styles.sendButtonDisabled]} 
-          onPress={sendMessage}
+          onPress={handleSendMessage}
           disabled={!newMessage.trim()}
         >
           <Ionicons name="send" size={20} color="#fff" />
         </TouchableOpacity>
       </View>
 
-      {/* Reactions Modal */}
       <Modal
         visible={!!selectedMessage}
         transparent
@@ -427,6 +472,7 @@ const styles = StyleSheet.create({
     fontSize: 10,
     color: '#4CD964',
     fontStyle: 'italic',
+    marginTop: 2,
   },
   imageButton: {
     padding: 8,
@@ -571,6 +617,24 @@ const styles = StyleSheet.create({
     paddingVertical: 2,
     borderRadius: 12,
     overflow: 'hidden',
+  },
+  newMessageDivider: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginVertical: 12,
+    paddingHorizontal: 16,
+  },
+  dividerLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: '#007AFF',
+    opacity: 0.3,
+  },
+  newMessageText: {
+    marginHorizontal: 12,
+    fontSize: 12,
+    color: '#007AFF',
+    fontWeight: '600',
   },
   inputContainer: {
     flexDirection: 'row',

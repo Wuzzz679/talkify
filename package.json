@@ -16,7 +16,6 @@
     "date-fns": "^4.1.0",
     "expo": "~54.0.33",
     "expo-image-picker": "^55.0.17",
-    "expo-notifications": "^55.0.17",
     "expo-status-bar": "~3.0.9",
     "firebase": "^12.11.0",
     "react": "19.1.0",
