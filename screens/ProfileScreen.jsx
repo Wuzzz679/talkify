@@ -46,53 +46,35 @@ const ProfileScreen = ({ navigation }) => {
   };
 
   const changeProfilePicture = async () => {
-    console.log('Change profile picture pressed');
-    
     try {
-      // Request permission
       const permissionResult = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      console.log('Permission result:', permissionResult);
       
       if (!permissionResult.granted) {
         Alert.alert('Permission Needed', 'Please grant gallery access to change profile picture');
         return;
       }
 
-      // Launch image picker - FIXED: Use 'images' string instead of ImagePicker.MediaType.Images
       const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: 'images',  // ← This is the fix
+        mediaTypes: 'images',
         allowsEditing: true,
         aspect: [1, 1],
         quality: 0.5,
       });
 
-      console.log('Image picker result:', result.canceled ? 'cancelled' : 'selected');
-
       if (!result.canceled) {
         setUpdating(true);
         try {
           const uri = result.assets[0].uri;
-          console.log('Image URI:', uri);
-          
-          // Convert image to Base64
           const response = await fetch(uri);
           const blob = await response.blob();
-          console.log('Blob size:', blob.size);
           
           const base64 = await new Promise((resolve, reject) => {
             const reader = new FileReader();
-            reader.onloadend = () => {
-              console.log('Base64 conversion complete');
-              resolve(reader.result);
-            };
-            reader.onerror = (error) => {
-              console.error('Reader error:', error);
-              reject(error);
-            };
+            reader.onloadend = () => resolve(reader.result);
+            reader.onerror = reject;
             reader.readAsDataURL(blob);
           });
           
-          // Save to Firestore
           await updateDoc(doc(db, 'users', auth.currentUser.uid), {
             avatarUrl: base64,
             updatedAt: new Date(),
@@ -192,7 +174,7 @@ const ProfileScreen = ({ navigation }) => {
   if (loading) {
     return (
       <View style={styles.loadingContainer}>
-        <ActivityIndicator size="large" color="#007AFF" />
+        <ActivityIndicator size="large" color="#4CD964" />
       </View>
     );
   }
@@ -201,13 +183,13 @@ const ProfileScreen = ({ navigation }) => {
     <View style={styles.container}>
       <View style={styles.header}>
         <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
-          <Ionicons name="arrow-back" size={24} color="#007AFF" />
+          <Ionicons name="arrow-back" size={24} color="#4CD964" />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Profile</Text>
         <View style={{ width: 40 }} />
       </View>
 
-      <ScrollView contentContainerStyle={styles.content}>
+      <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
         <View style={styles.avatarSection}>
           <TouchableOpacity 
             onPress={changeProfilePicture} 
@@ -224,7 +206,7 @@ const ProfileScreen = ({ navigation }) => {
               </View>
             )}
             <View style={styles.cameraIcon}>
-              <Ionicons name="camera" size={20} color="#fff" />
+              <Ionicons name="camera" size={20} color="#000000" />
             </View>
           </TouchableOpacity>
           <Text style={styles.userEmail}>{auth.currentUser?.email}</Text>
@@ -234,36 +216,36 @@ const ProfileScreen = ({ navigation }) => {
         <View style={styles.infoSection}>
           <TouchableOpacity style={styles.infoRow} onPress={() => { setEditField('username'); setEditValue(userData?.username || ''); }}>
             <View style={styles.infoLabelContainer}>
-              <Ionicons name="person-outline" size={20} color="#007AFF" />
+              <Ionicons name="person-outline" size={20} color="#4CD964" />
               <Text style={styles.infoLabel}>Username</Text>
             </View>
             <View style={styles.infoValueContainer}>
               <Text style={styles.infoValue}>{userData?.username || 'Not set'}</Text>
-              <Ionicons name="chevron-forward-outline" size={20} color="#999" />
+              <Ionicons name="chevron-forward-outline" size={20} color="#8E8E93" />
             </View>
           </TouchableOpacity>
 
           <TouchableOpacity style={styles.infoRow} onPress={() => { setEditField('bio'); setEditValue(userData?.bio || ''); }}>
             <View style={styles.infoLabelContainer}>
-              <Ionicons name="chatbubble-outline" size={20} color="#007AFF" />
+              <Ionicons name="chatbubble-outline" size={20} color="#4CD964" />
               <Text style={styles.infoLabel}>Bio</Text>
             </View>
             <View style={styles.infoValueContainer}>
               <Text style={[styles.infoValue, !userData?.bio && styles.placeholderText]}>
                 {userData?.bio || 'Add bio'}
               </Text>
-              <Ionicons name="chevron-forward-outline" size={20} color="#999" />
+              <Ionicons name="chevron-forward-outline" size={20} color="#8E8E93" />
             </View>
           </TouchableOpacity>
 
           <TouchableOpacity style={styles.infoRow} onPress={() => setShowPasswordModal(true)}>
             <View style={styles.infoLabelContainer}>
-              <Ionicons name="lock-closed-outline" size={20} color="#007AFF" />
+              <Ionicons name="lock-closed-outline" size={20} color="#4CD964" />
               <Text style={styles.infoLabel}>Password</Text>
             </View>
             <View style={styles.infoValueContainer}>
               <Text style={styles.infoValue}>••••••••</Text>
-              <Ionicons name="chevron-forward-outline" size={20} color="#999" />
+              <Ionicons name="chevron-forward-outline" size={20} color="#8E8E93" />
             </View>
           </TouchableOpacity>
         </View>
@@ -283,7 +265,7 @@ const ProfileScreen = ({ navigation }) => {
               value={editValue}
               onChangeText={setEditValue}
               placeholder={`Enter new ${editField}`}
-              placeholderTextColor="#999"
+              placeholderTextColor="#8E8E93"
               multiline={editField === 'bio'}
               numberOfLines={editField === 'bio' ? 3 : 1}
             />
@@ -306,7 +288,7 @@ const ProfileScreen = ({ navigation }) => {
             <TextInput 
               style={styles.modalInput} 
               placeholder="New Password (min 6 chars)" 
-              placeholderTextColor="#999"
+              placeholderTextColor="#8E8E93"
               secureTextEntry 
               value={newPassword} 
               onChangeText={setNewPassword} 
@@ -314,7 +296,7 @@ const ProfileScreen = ({ navigation }) => {
             <TextInput 
               style={styles.modalInput} 
               placeholder="Confirm New Password" 
-              placeholderTextColor="#999"
+              placeholderTextColor="#8E8E93"
               secureTextEntry 
               value={confirmPassword} 
               onChangeText={setConfirmPassword} 
@@ -337,12 +319,13 @@ const ProfileScreen = ({ navigation }) => {
 const styles = StyleSheet.create({
   container: { 
     flex: 1, 
-    backgroundColor: '#f8f9fa' 
+    backgroundColor: '#000000' 
   },
   loadingContainer: { 
     flex: 1, 
     justifyContent: 'center', 
-    alignItems: 'center' 
+    alignItems: 'center',
+    backgroundColor: '#000000' 
   },
   header: { 
     flexDirection: 'row', 
@@ -351,9 +334,9 @@ const styles = StyleSheet.create({
     paddingTop: Platform.OS === 'ios' ? 60 : 40, 
     paddingHorizontal: 20, 
     paddingBottom: 15, 
-    backgroundColor: '#fff', 
+    backgroundColor: '#1C1C1E', 
     borderBottomWidth: 1, 
-    borderBottomColor: '#e0e0e0' 
+    borderBottomColor: '#2C2C2E' 
   },
   backButton: { 
     padding: 8, 
@@ -362,7 +345,7 @@ const styles = StyleSheet.create({
   headerTitle: { 
     fontSize: 20, 
     fontWeight: 'bold', 
-    color: '#000' 
+    color: '#FFFFFF' 
   },
   content: { 
     paddingBottom: 40 
@@ -370,9 +353,9 @@ const styles = StyleSheet.create({
   avatarSection: { 
     alignItems: 'center', 
     paddingVertical: 24, 
-    backgroundColor: '#fff', 
+    backgroundColor: '#1C1C1E', 
     borderBottomWidth: 1, 
-    borderBottomColor: '#e0e0e0' 
+    borderBottomColor: '#2C2C2E' 
   },
   avatarContainer: { 
     position: 'relative', 
@@ -387,49 +370,52 @@ const styles = StyleSheet.create({
     width: 100, 
     height: 100, 
     borderRadius: 50, 
-    backgroundColor: '#007AFF', 
+    backgroundColor: '#4CD964', 
     justifyContent: 'center', 
     alignItems: 'center' 
   },
   avatarText: { 
     fontSize: 40, 
-    color: '#fff', 
+    color: '#000000', 
     fontWeight: 'bold' 
   },
   cameraIcon: { 
     position: 'absolute', 
     bottom: 0, 
     right: 0, 
-    backgroundColor: '#007AFF', 
+    backgroundColor: '#4CD964', 
     width: 32, 
     height: 32, 
     borderRadius: 16, 
     justifyContent: 'center', 
     alignItems: 'center', 
     borderWidth: 2, 
-    borderColor: '#fff' 
+    borderColor: '#000000' 
   },
   userEmail: { 
     fontSize: 14, 
-    color: '#666' 
+    color: '#8E8E93' 
   },
   tapText: {
     fontSize: 12,
-    color: '#999',
+    color: '#3A3A3C',
     marginTop: 8,
   },
   infoSection: { 
-    backgroundColor: '#fff', 
+    backgroundColor: '#1C1C1E', 
     marginTop: 16, 
-    paddingHorizontal: 16 
+    marginHorizontal: 16,
+    borderRadius: 12,
+    overflow: 'hidden',
   },
   infoRow: { 
     flexDirection: 'row', 
     justifyContent: 'space-between', 
     alignItems: 'center', 
     paddingVertical: 16, 
+    paddingHorizontal: 16,
     borderBottomWidth: 1, 
-    borderBottomColor: '#f0f0f0' 
+    borderBottomColor: '#2C2C2E' 
   },
   infoLabelContainer: { 
     flexDirection: 'row', 
@@ -438,7 +424,7 @@ const styles = StyleSheet.create({
   },
   infoLabel: { 
     fontSize: 16, 
-    color: '#333', 
+    color: '#FFFFFF', 
     fontWeight: '500' 
   },
   infoValueContainer: { 
@@ -448,17 +434,17 @@ const styles = StyleSheet.create({
   },
   infoValue: { 
     fontSize: 16, 
-    color: '#000' 
+    color: '#8E8E93' 
   },
   placeholderText: { 
-    color: '#999' 
+    color: '#3A3A3C' 
   },
   logoutButton: { 
     flexDirection: 'row', 
     alignItems: 'center', 
     justifyContent: 'center', 
     gap: 8, 
-    backgroundColor: '#fff', 
+    backgroundColor: '#1C1C1E', 
     marginTop: 24, 
     marginHorizontal: 16, 
     paddingVertical: 16, 
@@ -473,12 +459,12 @@ const styles = StyleSheet.create({
   },
   modalOverlay: { 
     flex: 1, 
-    backgroundColor: 'rgba(0,0,0,0.5)', 
+    backgroundColor: 'rgba(0,0,0,0.9)', 
     justifyContent: 'center', 
     alignItems: 'center' 
   },
   modalContent: { 
-    backgroundColor: '#fff', 
+    backgroundColor: '#1C1C1E', 
     borderRadius: 20, 
     padding: 20, 
     width: '85%' 
@@ -488,16 +474,17 @@ const styles = StyleSheet.create({
     fontWeight: 'bold', 
     textAlign: 'center', 
     marginBottom: 20, 
-    color: '#000' 
+    color: '#FFFFFF' 
   },
   modalInput: { 
     borderWidth: 1, 
-    borderColor: '#e0e0e0', 
+    borderColor: '#2C2C2E', 
     borderRadius: 12, 
     padding: 14, 
     fontSize: 16, 
     marginBottom: 16, 
-    backgroundColor: '#f8f9fa', 
+    backgroundColor: '#000000', 
+    color: '#FFFFFF',
     textAlignVertical: 'top' 
   },
   modalButtons: { 
@@ -512,17 +499,17 @@ const styles = StyleSheet.create({
     alignItems: 'center' 
   },
   cancelModalButton: { 
-    backgroundColor: '#f0f0f0' 
+    backgroundColor: '#2C2C2E' 
   },
   saveModalButton: { 
-    backgroundColor: '#007AFF' 
+    backgroundColor: '#4CD964' 
   },
   cancelModalText: { 
-    color: '#666', 
+    color: '#FFFFFF', 
     fontWeight: '600' 
   },
   saveModalText: { 
-    color: '#fff', 
+    color: '#000000', 
     fontWeight: '600' 
   },
 });

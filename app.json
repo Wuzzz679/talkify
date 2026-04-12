@@ -16,7 +16,12 @@
       "supportsTablet": true,
       "bundleIdentifier": "com.yourcompany.talkify",
       "infoPlist": {
-        "UIBackgroundModes": ["remote-notification"]
+        "UIBackgroundModes": [
+          "remote-notification"
+        ],
+        "NSPhotoLibraryUsageDescription": "This app needs access to your photo library to send images in chats",
+        "NSCameraUsageDescription": "This app needs access to your camera to take and send photos",
+        "NSMicrophoneUsageDescription": "This app needs access to microphone for video recording"
       }
     },
     "android": {
@@ -26,10 +31,27 @@
       },
       "edgeToEdgeEnabled": true,
       "package": "com.yourcompany.talkify",
-      "permissions": ["NOTIFICATIONS"]
+      "permissions": [
+        "NOTIFICATIONS",
+        "CAMERA",
+        "READ_EXTERNAL_STORAGE",
+        "WRITE_EXTERNAL_STORAGE",
+        "RECORD_AUDIO"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "plugins": [
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "The app needs access to your photos to share images in chat.",
+          "cameraPermission": "The app needs access to your camera to take photos for chat."
+        }
+      ],
+      "expo-audio",
+      "expo-video"
+    ]
   }
 }

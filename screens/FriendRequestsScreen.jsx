@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   View, 
   Text, 
@@ -6,21 +6,24 @@ import {
   TouchableOpacity, 
   StyleSheet, 
   Alert,
-  ActivityIndicator
+  ActivityIndicator,
+  Platform
 } from 'react-native';
 import { doc, getDoc, updateDoc, arrayRemove, arrayUnion } from 'firebase/firestore';
 import { auth, db } from '../config/firebase';
 import { Ionicons } from '@expo/vector-icons';
+import ConfettiCannon from 'react-native-confetti-cannon';
 
 const FriendRequestsScreen = ({ navigation }) => {
   const [requests, setRequests] = useState([]);
   const [loading, setLoading] = useState(false);
   const [processingId, setProcessingId] = useState(null);
+  const [showConfetti, setShowConfetti] = useState(false);
+  const confettiRef = useRef(null);
 
   useEffect(() => {
     loadRequests();
     
-    // Add focus listener to refresh when screen comes into focus
     const unsubscribe = navigation.addListener('focus', () => {
       loadRequests();
     });
@@ -58,7 +61,6 @@ const FriendRequestsScreen = ({ navigation }) => {
       const currentUserRef = doc(db, 'users', auth.currentUser.uid);
       const friendUserRef = doc(db, 'users', userId);
       
-      // Update both users' friend lists
       await updateDoc(currentUserRef, {
         friends: arrayUnion(userId),
         friendRequests: arrayRemove(userId)
@@ -68,17 +70,21 @@ const FriendRequestsScreen = ({ navigation }) => {
         friends: arrayUnion(auth.currentUser.uid)
       });
       
-      Alert.alert('Success', 'Friend added!');
+      // Show confetti animation
+      setShowConfetti(true);
       
-      // Refresh the requests list
-      await loadRequests();
-      
-      // Navigate back to Home screen to see updated friend list
-      navigation.goBack();
+      Alert.alert('Success', 'Friend added!', [
+        { text: 'OK', onPress: () => {
+          setShowConfetti(false);
+          loadRequests();
+          navigation.goBack();
+        }}
+      ]);
       
     } catch (error) {
       console.error('Error accepting request:', error);
       Alert.alert('Error', 'Failed to accept friend request');
+      setProcessingId(null);
     } finally {
       setProcessingId(null);
     }
@@ -141,7 +147,7 @@ const FriendRequestsScreen = ({ navigation }) => {
     <View style={styles.container}>
       <View style={styles.header}>
         <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
-          <Ionicons name="arrow-back" size={24} color="#007AFF" />
+          <Ionicons name="arrow-back" size={24} color="#4CD964" />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Friend Requests</Text>
         <View style={{ width: 40 }} />
@@ -149,7 +155,7 @@ const FriendRequestsScreen = ({ navigation }) => {
       
       {loading ? (
         <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color="#007AFF" />
+          <ActivityIndicator size="large" color="#4CD964" />
           <Text style={styles.loadingText}>Loading requests...</Text>
         </View>
       ) : (
@@ -160,11 +166,24 @@ const FriendRequestsScreen = ({ navigation }) => {
           contentContainerStyle={styles.list}
           ListEmptyComponent={
             <View style={styles.emptyContainer}>
-              <Ionicons name="person-add-outline" size={64} color="#ccc" />
+              <Ionicons name="person-add-outline" size={64} color="#3A3A3C" />
               <Text style={styles.emptyText}>No friend requests</Text>
               <Text style={styles.emptySubtext}>When someone adds you, you'll see it here</Text>
             </View>
           }
+        />
+      )}
+
+      {/* Confetti Animation */}
+      {showConfetti && (
+        <ConfettiCannon
+          count={200}
+          origin={{ x: -10, y: 0 }}
+          fallSpeed={3000}
+          explosionSpeed={350}
+          colors={['#4CD964', '#FF9800', '#FF6B6B', '#4CD964', '#2196F3', '#9C27B0']}
+          autoStart={true}
+          fadeOut={true}
         />
       )}
     </View>
@@ -174,27 +193,27 @@ const FriendRequestsScreen = ({ navigation }) => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#f8f9fa',
+    backgroundColor: '#000000',
   },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingTop: 60,
+    paddingTop: Platform.OS === 'ios' ? 50 : 40,
     paddingHorizontal: 20,
-    paddingBottom: 15,
-    backgroundColor: '#fff',
+    paddingBottom: 12,
+    backgroundColor: '#1C1C1E',
     borderBottomWidth: 1,
-    borderBottomColor: '#e0e0e0',
+    borderBottomColor: '#2C2C2E',
   },
   backButton: {
-    padding: 8,
-    marginLeft: -8,
+    padding: 6,
+    marginLeft: -6,
   },
   headerTitle: {
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: 'bold',
-    color: '#000',
+    color: '#FFFFFF',
   },
   list: {
     padding: 16,
@@ -202,28 +221,25 @@ const styles = StyleSheet.create({
   requestCard: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#fff',
+    backgroundColor: '#1C1C1E',
     padding: 16,
     borderRadius: 12,
     marginBottom: 12,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 2,
-    elevation: 2,
+    borderWidth: 1,
+    borderColor: '#2C2C2E',
   },
   avatar: {
     width: 50,
     height: 50,
     borderRadius: 25,
-    backgroundColor: '#007AFF',
+    backgroundColor: '#4CD964',
     justifyContent: 'center',
     alignItems: 'center',
     marginRight: 12,
   },
   avatarText: {
     fontSize: 20,
-    color: '#fff',
+    color: '#000000',
     fontWeight: 'bold',
   },
   requestInfo: {
@@ -232,11 +248,11 @@ const styles = StyleSheet.create({
   userName: {
     fontSize: 16,
     fontWeight: '600',
-    color: '#000',
+    color: '#FFFFFF',
   },
   userEmail: {
     fontSize: 12,
-    color: '#999',
+    color: '#8E8E93',
     marginTop: 2,
   },
   buttons: {
@@ -248,9 +264,14 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 8,
     borderRadius: 8,
+    shadowColor: '#4CD964',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.5,
+    shadowRadius: 5,
+    elevation: 5,
   },
   acceptText: {
-    color: '#fff',
+    color: '#000000',
     fontWeight: '600',
   },
   declineButton: {
@@ -258,9 +279,14 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 8,
     borderRadius: 8,
+    shadowColor: '#FF3B30',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.3,
+    shadowRadius: 3,
+    elevation: 3,
   },
   declineText: {
-    color: '#fff',
+    color: '#FFFFFF',
     fontWeight: '600',
   },
   buttonDisabled: {
@@ -273,12 +299,12 @@ const styles = StyleSheet.create({
   },
   emptyText: {
     fontSize: 18,
-    color: '#999',
+    color: '#8E8E93',
     marginTop: 16,
   },
   emptySubtext: {
     fontSize: 14,
-    color: '#ccc',
+    color: '#3A3A3C',
     marginTop: 8,
     textAlign: 'center',
   },
@@ -286,11 +312,12 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
+    backgroundColor: '#000000',
   },
   loadingText: {
     marginTop: 12,
     fontSize: 16,
-    color: '#666',
+    color: '#8E8E93',
   },
 });
 

@@ -1,0 +1,11 @@
+{
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true,
+    "skipLibCheck": true,     // This is the key!
+    "noEmit": true
+  },
+  "exclude": [
+    "node_modules"
+  ]
+}
