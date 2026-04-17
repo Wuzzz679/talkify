@@ -22,6 +22,7 @@ import {
   doc, 
   updateDoc, 
   arrayUnion, 
+  arrayRemove,
   getDoc,
   setDoc,
   onSnapshot
@@ -31,13 +32,13 @@ import { signOut } from 'firebase/auth';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
 import * as Haptics from 'expo-haptics';
-import { FAB } from 'react-native-paper';
+import { FAB, Provider as PaperProvider } from 'react-native-paper';
 
 const HomeScreen = ({ navigation }) => {
   const [friends, setFriends] = useState([]);
   const [filteredFriends, setFilteredFriends] = useState([]);
-  const [searchQuery, setSearchQuery] = useState(''); // For main friend list search
-  const [modalSearchQuery, setModalSearchQuery] = useState(''); // For modal add friend search
+  const [searchQuery, setSearchQuery] = useState('');
+  const [modalSearchQuery, setModalSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
   const [userData, setUserData] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -46,6 +47,14 @@ const HomeScreen = ({ navigation }) => {
   const [unreadCounts, setUnreadCounts] = useState({});
   const [refreshing, setRefreshing] = useState(false);
   const [showAddModal, setShowAddModal] = useState(false);
+  const [friendStatuses, setFriendStatuses] = useState({});
+  const [selectedFriend, setSelectedFriend] = useState(null);
+  const [showFriendMenu, setShowFriendMenu] = useState(false);
+  
+  // Group chat states
+  const [groups, setGroups] = useState([]);
+  const [groupUnreadCounts, setGroupUnreadCounts] = useState({});
+  const [fabOpen, setFabOpen] = useState(false);
   
   // Animation values
   const fadeAnim = useRef(new Animated.Value(1)).current;
@@ -64,7 +73,7 @@ const HomeScreen = ({ navigation }) => {
     }
   }, [searchQuery, friends]);
 
-  // Real-time listener for unread messages count
+  // Real-time listener for unread messages count (private chats)
   useEffect(() => {
     if (!auth.currentUser) return;
 
@@ -86,18 +95,82 @@ const HomeScreen = ({ navigation }) => {
     };
   }, [friends]);
 
+  // Real-time listener for friends' online status
   useEffect(() => {
+    if (!auth.currentUser || friends.length === 0) return;
+
+    const unsubscribes = friends.map(friend => {
+      const friendRef = doc(db, 'users', friend.id);
+      return onSnapshot(friendRef, (docSnap) => {
+        if (docSnap.exists()) {
+          const data = docSnap.data();
+          setFriendStatuses(prev => ({
+            ...prev,
+            [friend.id]: {
+              online: data.online || false,
+              lastSeen: data.lastSeen?.toDate?.() || null
+            }
+          }));
+        }
+      });
+    });
+
+    return () => {
+      unsubscribes.forEach(unsub => unsub && unsub());
+    };
+  }, [friends]);
+
+  // Load groups from user document
+  const loadGroups = async (groupIds) => {
+    if (!groupIds || groupIds.length === 0) {
+      setGroups([]);
+      return;
+    }
+    const groupsList = [];
+    for (const groupId of groupIds) {
+      const groupDoc = await getDoc(doc(db, 'groups', groupId));
+      if (groupDoc.exists()) {
+        groupsList.push({ id: groupDoc.id, ...groupDoc.data() });
+        const messagesRef = collection(db, 'groupMessages', groupId, 'messages');
+        const q = query(messagesRef, where('read', '==', false), where('userId', '!=', auth.currentUser.uid));
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+          setGroupUnreadCounts(prev => ({
+            ...prev,
+            [groupId]: snapshot.size
+          }));
+        });
+      }
+    }
+    setGroups(groupsList);
+  };
+
+  // Real-time listener for own user document to get groups array
+  useEffect(() => {
+    if (!auth.currentUser) return;
+    const userRef = doc(db, 'users', auth.currentUser.uid);
+    const unsubscribe = onSnapshot(userRef, (docSnap) => {
+      if (docSnap.exists()) {
+        const groupIds = docSnap.data().groups || [];
+        loadGroups(groupIds);
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Initial data load and real-time listener for own user document (friends)
+  useEffect(() => {
+    if (!auth.currentUser) return;
+
     loadUserData();
     loadFriends();
     
     const unsubscribe = onSnapshot(doc(db, 'users', auth.currentUser.uid), (docSnap) => {
-      if (docSnap.exists()) {
+      if (docSnap.exists() && auth.currentUser) {
         loadFriends();
         loadUserData();
       }
     });
     
-    // Animate FAB on mount
     Animated.spring(fabAnim, {
       toValue: 1,
       friction: 5,
@@ -109,12 +182,15 @@ const HomeScreen = ({ navigation }) => {
 
   useFocusEffect(
     useCallback(() => {
-      loadFriends();
-      loadUserData();
+      if (auth.currentUser) {
+        loadFriends();
+        loadUserData();
+      }
     }, [])
   );
 
   const loadUserData = async () => {
+    if (!auth.currentUser) return;
     try {
       const userDoc = await getDoc(doc(db, 'users', auth.currentUser.uid));
       if (userDoc.exists()) {
@@ -126,6 +202,9 @@ const HomeScreen = ({ navigation }) => {
           username: auth.currentUser.email?.split('@')[0],
           friends: [],
           friendRequests: [],
+          sentRequests: [],
+          groups: [],
+          blocked: [],
           createdAt: new Date(),
         };
         await setDoc(doc(db, 'users', auth.currentUser.uid), newUser);
@@ -137,12 +216,16 @@ const HomeScreen = ({ navigation }) => {
   };
 
   const loadFriends = async () => {
+    if (!auth.currentUser) return;
     try {
       const userDoc = await getDoc(doc(db, 'users', auth.currentUser.uid));
       if (userDoc.exists()) {
         const friendIds = userDoc.data().friends || [];
+        const blockedIds = userDoc.data().blocked || [];
         const friendsList = [];
         for (const friendId of friendIds) {
+          // Skip if blocked (shouldn't be in friends but just in case)
+          if (blockedIds.includes(friendId)) continue;
           const friendDoc = await getDoc(doc(db, 'users', friendId));
           if (friendDoc.exists()) {
             friendsList.push({ id: friendDoc.id, ...friendDoc.data() });
@@ -156,8 +239,83 @@ const HomeScreen = ({ navigation }) => {
     }
   };
 
-  // Search for users to add as friends (opens from FAB modal)
+  // Unfriend a user
+  const unfriendUser = async (friendId, friendName) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    Alert.alert(
+      'Unfriend',
+      `Are you sure you want to remove ${friendName} from your friends?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Unfriend',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              const currentUserRef = doc(db, 'users', auth.currentUser.uid);
+              const friendUserRef = doc(db, 'users', friendId);
+              
+              await updateDoc(currentUserRef, {
+                friends: arrayRemove(friendId)
+              });
+              await updateDoc(friendUserRef, {
+                friends: arrayRemove(auth.currentUser.uid)
+              });
+              
+              Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+              Alert.alert('Success', `Removed ${friendName} from your friends.`);
+              setShowFriendMenu(false);
+              setSelectedFriend(null);
+            } catch (error) {
+              console.error('Error unfriending:', error);
+              Alert.alert('Error', 'Failed to unfriend. Please try again.');
+            }
+          }
+        }
+      ]
+    );
+  };
+
+  // Block a user (removes from friends and adds to blocked list)
+  const blockUser = async (friendId, friendName) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+    Alert.alert(
+      'Block User',
+      `Are you sure you want to block ${friendName}? You will no longer receive messages from them and they will be removed from your friends.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Block',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              const currentUserRef = doc(db, 'users', auth.currentUser.uid);
+              const friendUserRef = doc(db, 'users', friendId);
+              
+              await updateDoc(currentUserRef, {
+                friends: arrayRemove(friendId),
+                blocked: arrayUnion(friendId)
+              });
+              await updateDoc(friendUserRef, {
+                friends: arrayRemove(auth.currentUser.uid)
+              });
+              
+              Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+              Alert.alert('Blocked', `${friendName} has been blocked.`);
+              setShowFriendMenu(false);
+              setSelectedFriend(null);
+            } catch (error) {
+              console.error('Error blocking user:', error);
+              Alert.alert('Error', 'Failed to block user. Please try again.');
+            }
+          }
+        }
+      ]
+    );
+  };
+
   const searchUsersToAdd = async () => {
+    if (!auth.currentUser) return;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     
     if (!modalSearchQuery.trim()) {
@@ -165,7 +323,6 @@ const HomeScreen = ({ navigation }) => {
       return;
     }
     
-    // Animate search button
     Animated.sequence([
       Animated.spring(searchScale, { toValue: 0.95, friction: 5, useNativeDriver: true }),
       Animated.spring(searchScale, { toValue: 1, friction: 5, useNativeDriver: true }),
@@ -203,6 +360,7 @@ const HomeScreen = ({ navigation }) => {
 
   const sendFriendRequest = async (userId, userUsername) => {
     if (sendingRequest) return;
+    if (!auth.currentUser) return;
     
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     setSendingRequest(true);
@@ -217,8 +375,14 @@ const HomeScreen = ({ navigation }) => {
       }
       
       await updateDoc(targetUserRef, {
-        friendRequests: arrayUnion(auth.currentUser.uid)
-      });
+  friendRequests: arrayUnion(auth.currentUser.uid)
+});
+
+// Also add to current user's sentRequests array
+const currentUserRef = doc(db, 'users', auth.currentUser.uid);
+await updateDoc(currentUserRef, {
+  sentRequests: arrayUnion(userId)
+});
       
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       Alert.alert('Success', `Friend request sent to ${userUsername}!`);
@@ -240,6 +404,11 @@ const HomeScreen = ({ navigation }) => {
     navigation.navigate('Chat', { friend: friend });
   };
 
+  const openGroupChat = (group) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    navigation.navigate('GroupChat', { group: group });
+  };
+
   const handleLogout = async () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
     Alert.alert(
@@ -252,9 +421,18 @@ const HomeScreen = ({ navigation }) => {
           style: 'destructive',
           onPress: async () => {
             try {
+              const user = auth.currentUser;
+              if (user) {
+                const userRef = doc(db, 'users', user.uid);
+                await updateDoc(userRef, { online: false, lastSeen: new Date() });
+                console.log('✅ User set offline before logout');
+                await new Promise(resolve => setTimeout(resolve, 500));
+              }
               await signOut(auth);
+              console.log('✅ Signed out successfully');
             } catch (error) {
-              Alert.alert('Error', 'Failed to logout');
+              console.error('Logout error:', error);
+              Alert.alert('Error', 'Failed to logout. Please try again.');
             }
           }
         }
@@ -263,6 +441,7 @@ const HomeScreen = ({ navigation }) => {
   };
 
   const onRefresh = async () => {
+    if (!auth.currentUser) return;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setRefreshing(true);
     await Promise.all([loadFriends(), loadUserData()]);
@@ -271,12 +450,24 @@ const HomeScreen = ({ navigation }) => {
 
   const openAddFriend = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setFabOpen(false);
     setModalSearchQuery('');
     setSearchResults([]);
     setShowAddModal(true);
   };
 
-  // Skeleton Loader Component
+  const openCreateGroup = () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setFabOpen(false);
+    navigation.navigate('CreateGroup');
+  };
+
+  const handleLongPressFriend = (friend) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setSelectedFriend(friend);
+    setShowFriendMenu(true);
+  };
+
   const SkeletonLoader = () => (
     <View style={styles.skeletonContainer}>
       {[1, 2, 3].map((item) => (
@@ -293,21 +484,33 @@ const HomeScreen = ({ navigation }) => {
 
   const renderFriend = ({ item }) => {
     const unreadCount = unreadCounts[item.id] || 0;
+    const isOnline = friendStatuses[item.id]?.online || false;
     
     return (
-      <TouchableOpacity style={styles.friendCard} onPress={() => startChat(item)} activeOpacity={0.7}>
-        {item.avatarUrl ? (
-          <Image source={{ uri: item.avatarUrl }} style={styles.avatarImage} />
-        ) : (
-          <View style={styles.avatar}>
-            <Text style={styles.avatarText}>{item.username?.[0]?.toUpperCase()}</Text>
-          </View>
-        )}
+      <TouchableOpacity 
+        style={styles.friendCard} 
+        onPress={() => startChat(item)} 
+        onLongPress={() => handleLongPressFriend(item)}
+        activeOpacity={0.7}
+        delayLongPress={300}
+      >
+        <View style={styles.avatarContainer}>
+          {item.avatarUrl ? (
+            <Image source={{ uri: item.avatarUrl }} style={styles.avatarImage} />
+          ) : (
+            <View style={styles.avatar}>
+              <Text style={styles.avatarText}>{item.username?.[0]?.toUpperCase()}</Text>
+            </View>
+          )}
+          {isOnline && <View style={styles.onlineDot} />}
+        </View>
         <View style={styles.friendInfo}>
           <Text style={styles.friendName}>{item.username}</Text>
-          {unreadCount > 0 && (
+          {unreadCount > 0 ? (
             <Text style={styles.newMessageText}>{unreadCount} new message{unreadCount !== 1 ? 's' : ''}</Text>
-          )}
+          ) : isOnline ? (
+            <Text style={styles.onlineText}>Online</Text>
+          ) : null}
         </View>
         <View style={styles.rightContainer}>
           {unreadCount > 0 && (
@@ -316,6 +519,29 @@ const HomeScreen = ({ navigation }) => {
             </View>
           )}
           <Ionicons name="chatbubble-outline" size={24} color="#4CD964" />
+        </View>
+      </TouchableOpacity>
+    );
+  };
+
+  const renderGroup = ({ item }) => {
+    const unreadCount = groupUnreadCounts[item.id] || 0;
+    return (
+      <TouchableOpacity style={styles.groupCard} onPress={() => openGroupChat(item)} activeOpacity={0.7}>
+        <View style={styles.groupAvatar}>
+          <Ionicons name="people" size={28} color="#000" />
+        </View>
+        <View style={styles.groupInfo}>
+          <Text style={styles.groupName}>{item.name}</Text>
+          <Text style={styles.groupMembers}>{item.members?.length || 0} members</Text>
+        </View>
+        <View style={styles.rightContainer}>
+          {unreadCount > 0 && (
+            <View style={styles.unreadBadge}>
+              <Text style={styles.unreadBadgeText}>{unreadCount}</Text>
+            </View>
+          )}
+          <Ionicons name="chatbubble-outline" size={24} color="#FF9800" />
         </View>
       </TouchableOpacity>
     );
@@ -354,173 +580,233 @@ const HomeScreen = ({ navigation }) => {
   );
 
   return (
-    <View style={styles.container}>
-      <View style={styles.header}>
-        <View>
-          <Text style={styles.headerTitle}>💬 Talkify</Text>
-          {userData && (
-            <Text style={styles.userGreeting}>Hello, {userData.username}!</Text>
-          )}
+    <PaperProvider>
+      <View style={styles.container}>
+        <View style={styles.header}>
+          <View>
+            <Text style={styles.headerTitle}>💬 Talkify</Text>
+            {userData && (
+              <Text style={styles.userGreeting}>Hello, {userData.username}!</Text>
+            )}
+          </View>
+          <View style={styles.headerButtons}>
+  <TouchableOpacity onPress={() => navigation.navigate('FriendRequests')} style={styles.headerButton}>
+    <Ionicons name="people-outline" size={26} color="#4CD964" />
+  </TouchableOpacity>
+  <TouchableOpacity onPress={() => navigation.navigate('Profile')} style={styles.headerButton}>
+    <Ionicons name="person-circle-outline" size={26} color="#4CD964" />
+  </TouchableOpacity>
+  <TouchableOpacity onPress={() => navigation.navigate('BlockedUsers')} style={styles.headerButton}>
+    <Ionicons name="ban-outline" size={26} color="#FF6B6B" />
+  </TouchableOpacity>
+  <TouchableOpacity onPress={handleLogout} style={styles.headerButton}>
+    <Ionicons name="log-out-outline" size={26} color="#FF6B6B" />
+  </TouchableOpacity>
+</View>
         </View>
-        <View style={styles.headerButtons}>
-          <TouchableOpacity onPress={() => navigation.navigate('FriendRequests')} style={styles.headerButton}>
-            <Ionicons name="people-outline" size={26} color="#4CD964" />
-          </TouchableOpacity>
-          <TouchableOpacity onPress={() => navigation.navigate('Profile')} style={styles.headerButton}>
-            <Ionicons name="person-circle-outline" size={26} color="#4CD964" />
-          </TouchableOpacity>
-          <TouchableOpacity onPress={handleLogout} style={styles.headerButton}>
-            <Ionicons name="log-out-outline" size={26} color="#FF6B6B" />
-          </TouchableOpacity>
-        </View>
-      </View>
 
-      {/* Search Bar - Filters existing friends only */}
-      <View style={styles.searchSection}>
-        <View style={styles.searchBar}>
-          <Ionicons name="search-outline" size={20} color="#888" />
-          <TextInput
-            style={styles.searchInput}
-            placeholder="Search your friends..."
-            placeholderTextColor="#666"
-            value={searchQuery}
-            onChangeText={setSearchQuery}
-          />
-          {searchQuery !== '' && (
-            <TouchableOpacity onPress={() => setSearchQuery('')}>
-              <Ionicons name="close-circle" size={20} color="#888" />
-            </TouchableOpacity>
-          )}
-        </View>
-      </View>
-
-      {loading ? (
-        <SkeletonLoader />
-      ) : (
-        <>
-          <Text style={styles.sectionTitle}>
-            My Friends ({filteredFriends.length})
-          </Text>
-          <FlatList
-            data={filteredFriends}
-            renderItem={renderFriend}
-            keyExtractor={(item) => item.id}
-            contentContainerStyle={styles.list}
-            showsVerticalScrollIndicator={false}
-            refreshControl={
-              <RefreshControl 
-                refreshing={refreshing} 
-                onRefresh={onRefresh} 
-                tintColor="#4CD964"
-                colors={['#4CD964', '#FF9800', '#FF6B6B']}
-                progressBackgroundColor="#1C1C1E"
-              />
-            }
-            ListEmptyComponent={
-              <View style={styles.emptyContainer}>
-                <Ionicons name="people-outline" size={80} color="#3A3A3C" />
-                <Text style={styles.emptyText}>
-                  {searchQuery ? 'No friends match your search' : 'No friends yet'}
-                </Text>
-                <Text style={styles.emptySubtext}>
-                  {searchQuery ? 'Try a different name' : 'Tap the + button to add friends!'}
-                </Text>
-              </View>
-            }
-          />
-        </>
-      )}
-
-      {/* Animated Floating Action Button */}
-      <Animated.View style={[styles.fabContainer, { transform: [{ scale: fabAnim }] }]}>
-        <FAB
-          icon="plus"
-          label="Add Friend"
-          style={styles.fab}
-          color="#000000"
-          onPress={openAddFriend}
-          animated={true}
-        />
-      </Animated.View>
-
-      {/* Add Friend Modal - Searches all users */}
-      <Modal
-        visible={showAddModal}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setShowAddModal(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Add Friend</Text>
-              <TouchableOpacity onPress={() => {
-                setShowAddModal(false);
-                setSearchResults([]);
-                setModalSearchQuery('');
-              }}>
-                <Ionicons name="close" size={24} color="#FFFFFF" />
+        <View style={styles.searchSection}>
+          <View style={styles.searchBar}>
+            <Ionicons name="search-outline" size={20} color="#888" />
+            <TextInput
+              style={styles.searchInput}
+              placeholder="Search your friends..."
+              placeholderTextColor="#666"
+              value={searchQuery}
+              onChangeText={setSearchQuery}
+            />
+            {searchQuery !== '' && (
+              <TouchableOpacity onPress={() => setSearchQuery('')}>
+                <Ionicons name="close-circle" size={20} color="#888" />
               </TouchableOpacity>
-            </View>
-            
-            {searchResults.length === 0 ? (
-              <>
-                <Text style={styles.modalSubtitle}>Enter username to find friends</Text>
-                <View style={styles.modalSearchSection}>
-                  <View style={styles.modalSearchBar}>
-                    <Ionicons name="search-outline" size={20} color="#888" />
-                    <TextInput
-                      style={styles.modalSearchInput}
-                      placeholder="Username"
-                      placeholderTextColor="#8E8E93"
-                      value={modalSearchQuery}
-                      onChangeText={setModalSearchQuery}
-                      autoCapitalize="none"
-                      onSubmitEditing={searchUsersToAdd}
-                    />
-                    {modalSearchQuery !== '' && (
-                      <TouchableOpacity onPress={() => setModalSearchQuery('')}>
-                        <Ionicons name="close-circle" size={20} color="#888" />
-                      </TouchableOpacity>
-                    )}
-                  </View>
-                  <TouchableOpacity 
-                    style={styles.modalSearchButton}
-                    onPress={searchUsersToAdd}
-                    disabled={searchingUsers}
-                    activeOpacity={0.8}
-                  >
-                    <Text style={styles.modalSearchButtonText}>
-                      {searchingUsers ? 'Searching...' : 'Search'}
-                    </Text>
-                  </TouchableOpacity>
-                </View>
-              </>
-            ) : (
-              <>
-                <Text style={styles.modalSubtitle}>Search Results ({searchResults.length})</Text>
-                <FlatList
-                  data={searchResults}
-                  renderItem={renderSearchResult}
-                  keyExtractor={(item) => item.id}
-                  style={styles.modalList}
-                  showsVerticalScrollIndicator={false}
-                />
-                <TouchableOpacity 
-                  style={styles.modalBackButton}
-                  onPress={() => {
-                    setSearchResults([]);
-                    setModalSearchQuery('');
-                  }}
-                >
-                  <Text style={styles.modalBackButtonText}>Back to Search</Text>
-                </TouchableOpacity>
-              </>
             )}
           </View>
         </View>
-      </Modal>
-    </View>
+
+        {loading ? (
+          <SkeletonLoader />
+        ) : (
+          <>
+            {/* Groups Section */}
+            {groups.length > 0 && (
+              <>
+                <Text style={styles.sectionTitle}>Groups ({groups.length})</Text>
+                <FlatList
+                  data={groups}
+                  renderItem={renderGroup}
+                  keyExtractor={(item) => item.id}
+                  contentContainerStyle={styles.list}
+                  showsVerticalScrollIndicator={false}
+                />
+              </>
+            )}
+
+            {/* Friends Section */}
+            <Text style={styles.sectionTitle}>
+              Friends ({filteredFriends.length})
+            </Text>
+            <FlatList
+              data={filteredFriends}
+              renderItem={renderFriend}
+              keyExtractor={(item) => item.id}
+              contentContainerStyle={styles.list}
+              showsVerticalScrollIndicator={false}
+              refreshControl={
+                <RefreshControl 
+                  refreshing={refreshing} 
+                  onRefresh={onRefresh} 
+                  tintColor="#4CD964"
+                  colors={['#4CD964', '#FF9800', '#FF6B6B']}
+                  progressBackgroundColor="#1C1C1E"
+                />
+              }
+              ListEmptyComponent={
+                <View style={styles.emptyContainer}>
+                  <Ionicons name="people-outline" size={80} color="#3A3A3C" />
+                  <Text style={styles.emptyText}>
+                    {searchQuery ? 'No friends match your search' : 'No friends yet'}
+                  </Text>
+                  <Text style={styles.emptySubtext}>
+                    {searchQuery ? 'Try a different name' : 'Tap the + button to add friends!'}
+                  </Text>
+                </View>
+              }
+            />
+          </>
+        )}
+
+        {/* Floating Action Button Group */}
+        <FAB.Group
+          visible={true}
+          open={fabOpen}
+          icon={fabOpen ? 'close' : 'plus'}
+          actions={[
+            { icon: 'account-plus', label: 'Add Friend', onPress: openAddFriend },
+            { icon: 'account-group', label: 'Create Group', onPress: openCreateGroup },
+          ]}
+          onStateChange={({ open }) => setFabOpen(open)}
+          fabStyle={styles.fab}
+          color="#000000"
+          backdropColor="rgba(0,0,0,0.5)"
+        />
+
+        {/* Add Friend Modal */}
+        <Modal
+          visible={showAddModal}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setShowAddModal(false)}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalContent}>
+              <View style={styles.modalHeader}>
+                <Text style={styles.modalTitle}>Add Friend</Text>
+                <TouchableOpacity onPress={() => {
+                  setShowAddModal(false);
+                  setSearchResults([]);
+                  setModalSearchQuery('');
+                }}>
+                  <Ionicons name="close" size={24} color="#FFFFFF" />
+                </TouchableOpacity>
+              </View>
+              
+              {searchResults.length === 0 ? (
+                <>
+                  <Text style={styles.modalSubtitle}>Enter username to find friends</Text>
+                  <View style={styles.modalSearchSection}>
+                    <View style={styles.modalSearchBar}>
+                      <Ionicons name="search-outline" size={20} color="#888" />
+                      <TextInput
+                        style={styles.modalSearchInput}
+                        placeholder="Username"
+                        placeholderTextColor="#8E8E93"
+                        value={modalSearchQuery}
+                        onChangeText={setModalSearchQuery}
+                        autoCapitalize="none"
+                        onSubmitEditing={searchUsersToAdd}
+                      />
+                      {modalSearchQuery !== '' && (
+                        <TouchableOpacity onPress={() => setModalSearchQuery('')}>
+                          <Ionicons name="close-circle" size={20} color="#888" />
+                        </TouchableOpacity>
+                      )}
+                    </View>
+                    <TouchableOpacity 
+                      style={styles.modalSearchButton}
+                      onPress={searchUsersToAdd}
+                      disabled={searchingUsers}
+                      activeOpacity={0.8}
+                    >
+                      <Text style={styles.modalSearchButtonText}>
+                        {searchingUsers ? 'Searching...' : 'Search'}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                </>
+              ) : (
+                <>
+                  <Text style={styles.modalSubtitle}>Search Results ({searchResults.length})</Text>
+                  <FlatList
+                    data={searchResults}
+                    renderItem={renderSearchResult}
+                    keyExtractor={(item) => item.id}
+                    style={styles.modalList}
+                    showsVerticalScrollIndicator={false}
+                  />
+                  <TouchableOpacity 
+                    style={styles.modalBackButton}
+                    onPress={() => {
+                      setSearchResults([]);
+                      setModalSearchQuery('');
+                    }}
+                  >
+                    <Text style={styles.modalBackButtonText}>Back to Search</Text>
+                  </TouchableOpacity>
+                </>
+              )}
+            </View>
+          </View>
+        </Modal>
+
+        {/* Friend Action Modal (Unfriend / Block) */}
+        <Modal
+          visible={showFriendMenu}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setShowFriendMenu(false)}
+        >
+          <TouchableOpacity 
+            style={styles.modalOverlay} 
+            activeOpacity={1} 
+            onPress={() => setShowFriendMenu(false)}
+          >
+            <View style={styles.actionSheet}>
+              <Text style={styles.actionSheetTitle}>Manage Friend</Text>
+              <Text style={styles.actionSheetSubtitle}>{selectedFriend?.username}</Text>
+              <TouchableOpacity 
+                style={styles.actionItem} 
+                onPress={() => unfriendUser(selectedFriend?.id, selectedFriend?.username)}
+              >
+                <Ionicons name="person-remove-outline" size={24} color="#FF9800" />
+                <Text style={[styles.actionText, styles.unfriendText]}>Unfriend</Text>
+              </TouchableOpacity>
+              <TouchableOpacity 
+                style={styles.actionItem} 
+                onPress={() => blockUser(selectedFriend?.id, selectedFriend?.username)}
+              >
+                <Ionicons name="ban-outline" size={24} color="#FF3B30" />
+                <Text style={[styles.actionText, styles.blockText]}>Block</Text>
+              </TouchableOpacity>
+              <View style={styles.actionDivider} />
+              <TouchableOpacity style={styles.actionItem} onPress={() => setShowFriendMenu(false)}>
+                <Ionicons name="close-outline" size={24} color="#888" />
+                <Text style={styles.actionText}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+          </TouchableOpacity>
+        </Modal>
+      </View>
+    </PaperProvider>
   );
 };
 
@@ -606,6 +892,10 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#2C2C2E',
   },
+  avatarContainer: {
+    position: 'relative',
+    marginRight: 12,
+  },
   avatar: {
     width: 50,
     height: 50,
@@ -613,18 +903,27 @@ const styles = StyleSheet.create({
     backgroundColor: '#4CD964',
     justifyContent: 'center',
     alignItems: 'center',
-    marginRight: 12,
   },
   avatarImage: {
     width: 50,
     height: 50,
     borderRadius: 25,
-    marginRight: 12,
   },
   avatarText: {
     fontSize: 20,
     color: '#000000',
     fontWeight: 'bold',
+  },
+  onlineDot: {
+    position: 'absolute',
+    bottom: 2,
+    right: 2,
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    backgroundColor: '#4CD964',
+    borderWidth: 2,
+    borderColor: '#1C1C1E',
   },
   friendInfo: {
     flex: 1,
@@ -640,6 +939,12 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   newMessageText: {
+    fontSize: 12,
+    color: '#4CD964',
+    fontWeight: '500',
+    marginTop: 2,
+  },
+  onlineText: {
     fontSize: 12,
     color: '#4CD964',
     fontWeight: '500',
@@ -663,6 +968,38 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: 'bold',
   },
+  groupCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#1C1C1E',
+    padding: 16,
+    borderRadius: 12,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#2C2C2E',
+  },
+  groupAvatar: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: '#FF9800',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 12,
+  },
+  groupInfo: {
+    flex: 1,
+  },
+  groupName: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#FFFFFF',
+  },
+  groupMembers: {
+    fontSize: 12,
+    color: '#8E8E93',
+    marginTop: 2,
+  },
   emptyContainer: {
     alignItems: 'center',
     justifyContent: 'center',
@@ -680,7 +1017,6 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     paddingHorizontal: 40,
   },
-  // Skeleton Loader Styles
   skeletonContainer: {
     padding: 16,
   },
@@ -715,12 +1051,6 @@ const styles = StyleSheet.create({
     backgroundColor: '#2C2C2E',
     borderRadius: 6,
   },
-  // FAB Styles
-  fabContainer: {
-    position: 'absolute',
-    bottom: 20,
-    right: 20,
-  },
   fab: {
     backgroundColor: '#4CD964',
     borderRadius: 28,
@@ -730,10 +1060,9 @@ const styles = StyleSheet.create({
     shadowRadius: 10,
     elevation: 10,
   },
-  // Modal Styles
   modalOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.9)',
+    backgroundColor: 'rgba(0,0,0,0.8)',
     justifyContent: 'center',
     alignItems: 'center',
   },
@@ -846,6 +1175,52 @@ const styles = StyleSheet.create({
     color: '#8E8E93',
     fontSize: 12,
     fontWeight: '600',
+  },
+  // Action Sheet Styles (for friend menu)
+  actionSheet: {
+    backgroundColor: '#2C2C2C',
+    borderRadius: 14,
+    padding: 16,
+    width: '85%',
+    maxWidth: 300,
+  },
+  actionSheetTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#FFFFFF',
+    textAlign: 'center',
+    marginBottom: 8,
+  },
+  actionSheetSubtitle: {
+    fontSize: 14,
+    color: '#AAAAAA',
+    textAlign: 'center',
+    marginBottom: 16,
+    paddingBottom: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#444444',
+  },
+  actionItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    gap: 12,
+  },
+  actionText: {
+    fontSize: 16,
+    color: '#FFFFFF',
+  },
+  unfriendText: {
+    color: '#FF9800',
+  },
+  blockText: {
+    color: '#FF3B30',
+  },
+  actionDivider: {
+    height: 1,
+    backgroundColor: '#444444',
+    marginVertical: 8,
   },
 });
 

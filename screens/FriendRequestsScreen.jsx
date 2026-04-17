@@ -15,7 +15,9 @@ import { Ionicons } from '@expo/vector-icons';
 import ConfettiCannon from 'react-native-confetti-cannon';
 
 const FriendRequestsScreen = ({ navigation }) => {
-  const [requests, setRequests] = useState([]);
+  const [incomingRequests, setIncomingRequests] = useState([]);
+  const [outgoingRequests, setOutgoingRequests] = useState([]);
+  const [activeTab, setActiveTab] = useState('incoming');
   const [loading, setLoading] = useState(false);
   const [processingId, setProcessingId] = useState(null);
   const [showConfetti, setShowConfetti] = useState(false);
@@ -36,15 +38,29 @@ const FriendRequestsScreen = ({ navigation }) => {
     try {
       const userDoc = await getDoc(doc(db, 'users', auth.currentUser.uid));
       if (userDoc.exists()) {
-        const requestIds = userDoc.data().friendRequests || [];
-        const requestsList = [];
-        for (const requestId of requestIds) {
-          const requestDoc = await getDoc(doc(db, 'users', requestId));
-          if (requestDoc.exists()) {
-            requestsList.push({ id: requestDoc.id, ...requestDoc.data() });
+        const data = userDoc.data();
+        
+        // Incoming: friendRequests array
+        const incomingIds = data.friendRequests || [];
+        const incomingList = [];
+        for (const id of incomingIds) {
+          const docSnap = await getDoc(doc(db, 'users', id));
+          if (docSnap.exists()) {
+            incomingList.push({ id: docSnap.id, ...docSnap.data() });
           }
         }
-        setRequests(requestsList);
+        setIncomingRequests(incomingList);
+
+        // Outgoing: sentRequests array
+        const outgoingIds = data.sentRequests || [];
+        const outgoingList = [];
+        for (const id of outgoingIds) {
+          const docSnap = await getDoc(doc(db, 'users', id));
+          if (docSnap.exists()) {
+            outgoingList.push({ id: docSnap.id, ...docSnap.data() });
+          }
+        }
+        setOutgoingRequests(outgoingList);
       }
     } catch (error) {
       console.error('Error loading requests:', error);
@@ -55,7 +71,6 @@ const FriendRequestsScreen = ({ navigation }) => {
 
   const acceptRequest = async (userId) => {
     if (processingId === userId) return;
-    
     setProcessingId(userId);
     try {
       const currentUserRef = doc(db, 'users', auth.currentUser.uid);
@@ -67,12 +82,11 @@ const FriendRequestsScreen = ({ navigation }) => {
       });
       
       await updateDoc(friendUserRef, {
-        friends: arrayUnion(auth.currentUser.uid)
+        friends: arrayUnion(auth.currentUser.uid),
+        sentRequests: arrayRemove(auth.currentUser.uid)  // remove from their sentRequests
       });
       
-      // Show confetti animation
       setShowConfetti(true);
-      
       Alert.alert('Success', 'Friend added!', [
         { text: 'OK', onPress: () => {
           setShowConfetti(false);
@@ -80,11 +94,9 @@ const FriendRequestsScreen = ({ navigation }) => {
           navigation.goBack();
         }}
       ]);
-      
     } catch (error) {
       console.error('Error accepting request:', error);
       Alert.alert('Error', 'Failed to accept friend request');
-      setProcessingId(null);
     } finally {
       setProcessingId(null);
     }
@@ -92,17 +104,22 @@ const FriendRequestsScreen = ({ navigation }) => {
 
   const declineRequest = async (userId) => {
     if (processingId === userId) return;
-    
     setProcessingId(userId);
     try {
       const currentUserRef = doc(db, 'users', auth.currentUser.uid);
+      const requesterRef = doc(db, 'users', userId);
+      
       await updateDoc(currentUserRef, {
         friendRequests: arrayRemove(userId)
       });
       
-      await loadRequests();
-      Alert.alert('Success', 'Friend request declined');
+      // Also remove from requester's sentRequests if they had it
+      await updateDoc(requesterRef, {
+        sentRequests: arrayRemove(auth.currentUser.uid)
+      });
       
+      await loadRequests();
+      Alert.alert('Declined', 'Friend request declined');
     } catch (error) {
       console.error('Error declining request:', error);
       Alert.alert('Error', 'Failed to decline friend request');
@@ -111,7 +128,47 @@ const FriendRequestsScreen = ({ navigation }) => {
     }
   };
 
-  const renderRequest = ({ item }) => (
+  const cancelRequest = async (userId, userName) => {
+    if (processingId === userId) return;
+    Alert.alert(
+      'Cancel Request',
+      `Cancel friend request to ${userName}?`,
+      [
+        { text: 'No', style: 'cancel' },
+        {
+          text: 'Yes, Cancel',
+          style: 'destructive',
+          onPress: async () => {
+            setProcessingId(userId);
+            try {
+              const currentUserRef = doc(db, 'users', auth.currentUser.uid);
+              const targetUserRef = doc(db, 'users', userId);
+              
+              // Remove from current user's sentRequests
+              await updateDoc(currentUserRef, {
+                sentRequests: arrayRemove(userId)
+              });
+              
+              // Remove from target user's friendRequests
+              await updateDoc(targetUserRef, {
+                friendRequests: arrayRemove(auth.currentUser.uid)
+              });
+              
+              await loadRequests();
+              Alert.alert('Cancelled', 'Friend request cancelled');
+            } catch (error) {
+              console.error('Error cancelling request:', error);
+              Alert.alert('Error', 'Failed to cancel request');
+            } finally {
+              setProcessingId(null);
+            }
+          }
+        }
+      ]
+    );
+  };
+
+  const renderIncomingRequest = ({ item }) => (
     <View style={styles.requestCard}>
       <View style={styles.avatar}>
         <Text style={styles.avatarText}>{item.username?.[0]?.toUpperCase()}</Text>
@@ -143,6 +200,41 @@ const FriendRequestsScreen = ({ navigation }) => {
     </View>
   );
 
+  const renderOutgoingRequest = ({ item }) => (
+    <View style={styles.requestCard}>
+      <View style={styles.avatarOutgoing}>
+        <Text style={styles.avatarText}>{item.username?.[0]?.toUpperCase()}</Text>
+      </View>
+      <View style={styles.requestInfo}>
+        <Text style={styles.userName}>{item.username}</Text>
+        <Text style={styles.userEmail}>{item.email}</Text>
+      </View>
+      <TouchableOpacity 
+        style={[styles.cancelButton, processingId === item.id && styles.buttonDisabled]} 
+        onPress={() => cancelRequest(item.id, item.username)}
+        disabled={processingId === item.id}
+      >
+        <Text style={styles.cancelText}>
+          {processingId === item.id ? 'Cancelling...' : 'Cancel Request'}
+        </Text>
+      </TouchableOpacity>
+    </View>
+  );
+
+  const renderEmpty = () => (
+    <View style={styles.emptyContainer}>
+      <Ionicons name="person-add-outline" size={64} color="#3A3A3C" />
+      <Text style={styles.emptyText}>
+        {activeTab === 'incoming' ? 'No incoming requests' : 'No outgoing requests'}
+      </Text>
+      <Text style={styles.emptySubtext}>
+        {activeTab === 'incoming' 
+          ? 'When someone adds you, you\'ll see it here' 
+          : 'When you send a request, it will appear here'}
+      </Text>
+    </View>
+  );
+
   return (
     <View style={styles.container}>
       <View style={styles.header}>
@@ -152,7 +244,27 @@ const FriendRequestsScreen = ({ navigation }) => {
         <Text style={styles.headerTitle}>Friend Requests</Text>
         <View style={{ width: 40 }} />
       </View>
-      
+
+      {/* Tabs */}
+      <View style={styles.tabContainer}>
+        <TouchableOpacity 
+          style={[styles.tab, activeTab === 'incoming' && styles.activeTab]} 
+          onPress={() => setActiveTab('incoming')}
+        >
+          <Text style={[styles.tabText, activeTab === 'incoming' && styles.activeTabText]}>
+            Incoming ({incomingRequests.length})
+          </Text>
+        </TouchableOpacity>
+        <TouchableOpacity 
+          style={[styles.tab, activeTab === 'outgoing' && styles.activeTab]} 
+          onPress={() => setActiveTab('outgoing')}
+        >
+          <Text style={[styles.tabText, activeTab === 'outgoing' && styles.activeTabText]}>
+            Outgoing ({outgoingRequests.length})
+          </Text>
+        </TouchableOpacity>
+      </View>
+
       {loading ? (
         <View style={styles.loadingContainer}>
           <ActivityIndicator size="large" color="#4CD964" />
@@ -160,21 +272,14 @@ const FriendRequestsScreen = ({ navigation }) => {
         </View>
       ) : (
         <FlatList
-          data={requests}
-          renderItem={renderRequest}
+          data={activeTab === 'incoming' ? incomingRequests : outgoingRequests}
+          renderItem={activeTab === 'incoming' ? renderIncomingRequest : renderOutgoingRequest}
           keyExtractor={(item) => item.id}
           contentContainerStyle={styles.list}
-          ListEmptyComponent={
-            <View style={styles.emptyContainer}>
-              <Ionicons name="person-add-outline" size={64} color="#3A3A3C" />
-              <Text style={styles.emptyText}>No friend requests</Text>
-              <Text style={styles.emptySubtext}>When someone adds you, you'll see it here</Text>
-            </View>
-          }
+          ListEmptyComponent={renderEmpty}
         />
       )}
 
-      {/* Confetti Animation */}
       {showConfetti && (
         <ConfettiCannon
           count={200}
@@ -215,6 +320,32 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     color: '#FFFFFF',
   },
+  tabContainer: {
+    flexDirection: 'row',
+    backgroundColor: '#1C1C1E',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#2C2C2E',
+  },
+  tab: {
+    flex: 1,
+    paddingVertical: 10,
+    alignItems: 'center',
+    borderRadius: 8,
+    marginHorizontal: 4,
+  },
+  activeTab: {
+    backgroundColor: '#4CD964',
+  },
+  tabText: {
+    color: '#8E8E93',
+    fontWeight: '600',
+    fontSize: 14,
+  },
+  activeTabText: {
+    color: '#000000',
+  },
   list: {
     padding: 16,
   },
@@ -233,6 +364,15 @@ const styles = StyleSheet.create({
     height: 50,
     borderRadius: 25,
     backgroundColor: '#4CD964',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 12,
+  },
+  avatarOutgoing: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: '#FF9800',
     justifyContent: 'center',
     alignItems: 'center',
     marginRight: 12,
@@ -289,6 +429,21 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontWeight: '600',
   },
+  cancelButton: {
+    backgroundColor: '#FF9800',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 8,
+    shadowColor: '#FF9800',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.3,
+    shadowRadius: 3,
+    elevation: 3,
+  },
+  cancelText: {
+    color: '#000000',
+    fontWeight: '600',
+  },
   buttonDisabled: {
     opacity: 0.6,
   },
@@ -307,6 +462,7 @@ const styles = StyleSheet.create({
     color: '#3A3A3C',
     marginTop: 8,
     textAlign: 'center',
+    paddingHorizontal: 40,
   },
   loadingContainer: {
     flex: 1,

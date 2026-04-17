@@ -14,7 +14,7 @@ import {
   Animated,
   Dimensions
 } from 'react-native';
-import { collection, addDoc, query, orderBy, onSnapshot, doc, updateDoc, setDoc, deleteDoc } from 'firebase/firestore';
+import { collection, addDoc, query, orderBy, onSnapshot, doc, updateDoc, setDoc, deleteDoc, getDoc, getDocs, arrayRemove } from 'firebase/firestore';
 import * as ImagePicker from 'expo-image-picker';
 import * as ImageManipulator from 'expo-image-manipulator';
 import { auth, db } from '../config/firebase';
@@ -27,7 +27,10 @@ import { Image as ExpoImage } from 'expo-image';
 const { width, height } = Dimensions.get('window');
 
 export default function ChatScreen({ navigation, route }) {
-  const { friend } = route.params;
+  const { friend, group } = route.params;
+  const isGroupChat = !!group;
+  const chatPartner = isGroupChat ? group : friend;
+  
   const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState('');
   const [chatId, setChatId] = useState(null);
@@ -44,6 +47,7 @@ export default function ChatScreen({ navigation, route }) {
   const [showPinnedMessages, setShowPinnedMessages] = useState(false);
   const [showImageViewer, setShowImageViewer] = useState(false);
   const [selectedImageUrl, setSelectedImageUrl] = useState('');
+  const [friendOnline, setFriendOnline] = useState(false);
   
   // Voice recording states
   const [isRecording, setIsRecording] = useState(false);
@@ -52,7 +56,6 @@ export default function ChatScreen({ navigation, route }) {
   const [playingId, setPlayingId] = useState(null);
   const [sound, setSound] = useState(null);
   
-  // Ref to prevent duplicate stop calls
   const isStoppingRef = useRef(false);
   
   const flatListRef = useRef(null);
@@ -91,27 +94,26 @@ export default function ChatScreen({ navigation, route }) {
     }
   }, [isRecording]);
 
-  // Typing indicator animation
+  // Typing indicator animation (only for private chats)
   useEffect(() => {
-    const animateDot = (dot, delay) => {
-      Animated.loop(
-        Animated.sequence([
-          Animated.timing(dot, {
-            toValue: 1,
-            duration: 300,
-            delay,
-            useNativeDriver: true,
-          }),
-          Animated.timing(dot, {
-            toValue: 0,
-            duration: 300,
-            useNativeDriver: true,
-          }),
-        ])
-      ).start();
-    };
-    
-    if (otherUserTyping) {
+    if (!isGroupChat && otherUserTyping) {
+      const animateDot = (dot, delay) => {
+        Animated.loop(
+          Animated.sequence([
+            Animated.timing(dot, {
+              toValue: 1,
+              duration: 300,
+              delay,
+              useNativeDriver: true,
+            }),
+            Animated.timing(dot, {
+              toValue: 0,
+              duration: 300,
+              useNativeDriver: true,
+            }),
+          ])
+        ).start();
+      };
       animateDot(dot1, 0);
       animateDot(dot2, 150);
       animateDot(dot3, 300);
@@ -120,7 +122,7 @@ export default function ChatScreen({ navigation, route }) {
       dot2.setValue(0);
       dot3.setValue(0);
     }
-  }, [otherUserTyping]);
+  }, [otherUserTyping, isGroupChat]);
 
   // Clean up sound on unmount
   useEffect(() => {
@@ -131,11 +133,36 @@ export default function ChatScreen({ navigation, route }) {
     };
   }, [sound]);
 
+  // Listen to friend's online status (only for private chats)
   useEffect(() => {
-    const chatRoomId = [auth.currentUser.uid, friend.id].sort().join('_');
+    if (isGroupChat || !chatPartner?.id) return;
+    const friendRef = doc(db, 'users', chatPartner.id);
+    const unsubscribe = onSnapshot(friendRef, (docSnap) => {
+      if (docSnap.exists()) {
+        setFriendOnline(docSnap.data().online || false);
+      }
+    });
+    return () => unsubscribe();
+  }, [chatPartner?.id, isGroupChat]);
+
+  // Main chat listener
+  useEffect(() => {
+    let chatRoomId;
+    let messagesRef;
+    let typingRef;
+
+    if (isGroupChat) {
+      chatRoomId = chatPartner.id;
+      messagesRef = collection(db, 'groupMessages', chatRoomId, 'messages');
+      typingRef = null;
+    } else {
+      chatRoomId = [auth.currentUser.uid, chatPartner.id].sort().join('_');
+      messagesRef = collection(db, 'chats', chatRoomId, 'messages');
+      typingRef = doc(db, 'typing', chatRoomId);
+    }
+    
     setChatId(chatRoomId);
     
-    const messagesRef = collection(db, 'chats', chatRoomId, 'messages');
     const q = query(messagesRef, orderBy('bumpedAt', 'asc'));
     
     const unsubscribeMessages = onSnapshot(q, (snapshot) => {
@@ -146,15 +173,12 @@ export default function ChatScreen({ navigation, route }) {
         bumpedAt: doc.data().bumpedAt?.toDate() || doc.data().createdAt?.toDate() || new Date(),
       }));
       
-      const sortedMessages = messagesList.sort((a, b) => {
-        return a.bumpedAt - b.bumpedAt;
-      });
+      const sortedMessages = messagesList.sort((a, b) => a.bumpedAt - b.bumpedAt);
       
       const unreadMessages = sortedMessages.filter(
         msg => msg.userId !== auth.currentUser?.uid && !msg.read
       );
       const unreadCount = unreadMessages.length;
-      
       const unreadMessage = unreadMessages[unreadMessages.length - 1];
       
       if (unreadMessage && unreadCount > 0) {
@@ -168,21 +192,23 @@ export default function ChatScreen({ navigation, route }) {
       setMessages(sortedMessages);
     });
     
-    const typingRef = doc(db, 'typing', chatRoomId);
-    const unsubscribeTyping = onSnapshot(typingRef, (docSnap) => {
-      if (docSnap.exists() && docSnap.data()[friend.id] === true) {
-        setOtherUserTyping(true);
-      } else {
-        setOtherUserTyping(false);
-      }
-    });
+    let unsubscribeTyping = () => {};
+    if (typingRef && !isGroupChat) {
+      unsubscribeTyping = onSnapshot(typingRef, (docSnap) => {
+        if (docSnap.exists() && docSnap.data()[chatPartner.id] === true) {
+          setOtherUserTyping(true);
+        } else {
+          setOtherUserTyping(false);
+        }
+      });
+    }
     
     return () => {
       unsubscribeMessages();
       unsubscribeTyping();
       if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
     };
-  }, [friend.id]);
+  }, [chatPartner.id, isGroupChat]);
 
   const markAllMessagesAsRead = async () => {
     if (!chatId) return;
@@ -193,8 +219,12 @@ export default function ChatScreen({ navigation, route }) {
     
     if (unreadMessages.length === 0) return;
     
+    const collectionPath = isGroupChat 
+      ? `groupMessages/${chatId}/messages`
+      : `chats/${chatId}/messages`;
+    
     for (const msg of unreadMessages) {
-      const messageRef = doc(db, 'chats', chatId, 'messages', msg.id);
+      const messageRef = doc(db, collectionPath, msg.id);
       await updateDoc(messageRef, { read: true });
     }
     
@@ -208,53 +238,103 @@ export default function ChatScreen({ navigation, route }) {
     }
   }, [messages, chatId]);
 
-  // Voice Recording Functions - Fixed (prevents duplicate calls)
+  // Leave group function with system message
+  const leaveGroup = async () => {
+  Alert.alert(
+    'Leave Group',
+    `Are you sure you want to leave "${chatPartner.name}"? You won't be able to see messages unless re-invited.`,
+    [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Leave',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            const groupRef = doc(db, 'groups', chatId);
+            const groupSnap = await getDoc(groupRef);
+            if (!groupSnap.exists()) return;
+
+            const currentMembers = groupSnap.data().members || [];
+            const newMembers = currentMembers.filter(uid => uid !== auth.currentUser.uid);
+           const userDoc = await getDoc(doc(db, 'users', auth.currentUser.uid));
+const leavingUserName = userDoc.exists() ? userDoc.data().username : auth.currentUser.email?.split('@')[0] || 'Someone';
+
+            // Add system message if group still exists
+            if (newMembers.length > 0) {
+              const messagesRef = collection(db, 'groupMessages', chatId, 'messages');
+              await addDoc(messagesRef, {
+                type: 'system',
+                text: `${leavingUserName} left the group`,
+                createdAt: new Date(),
+                bumpedAt: new Date(),
+                userId: 'system',
+                userName: 'System',
+                read: false,
+              });
+            }
+
+            // Delete group if no members left
+            if (newMembers.length === 0) {
+              await deleteDoc(groupRef);
+              const messagesRef = collection(db, 'groupMessages', chatId, 'messages');
+              const messagesSnap = await getDocs(messagesRef);
+              const deletePromises = messagesSnap.docs.map(d => deleteDoc(d.ref));
+              await Promise.all(deletePromises);
+            } else {
+              await updateDoc(groupRef, {
+                members: arrayRemove(auth.currentUser.uid)
+              });
+            }
+
+            // Remove group from user's groups array
+            const userRef = doc(db, 'users', auth.currentUser.uid);
+            await updateDoc(userRef, {
+              groups: arrayRemove(chatId)
+            });
+
+            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+            Alert.alert('Left Group', 'You have left the group.');
+
+            // ✅ FIX: Navigate to Home instead of goBack()
+            navigation.replace('Home');
+          } catch (error) {
+            console.error('Error leaving group:', error);
+            Alert.alert('Error', 'Failed to leave group. Please try again.');
+          }
+        }
+      }
+    ]
+  );
+};
+  // Voice Recording Functions (same as before)
   const startRecording = async () => {
     try {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-      
-      // First, clean up any existing recording
       if (recording) {
-        try {
-          await recording.stopAndUnloadAsync();
-        } catch (e) {
-          // Ignore errors when stopping
-        }
+        try { await recording.stopAndUnloadAsync(); } catch (e) {}
         setRecording(null);
       }
-      
-      // Also clean up any playing sound
       if (sound) {
-        try {
-          await sound.unloadAsync();
-        } catch (e) {
-          // Ignore errors
-        }
+        try { await sound.unloadAsync(); } catch (e) {}
         setSound(null);
         setIsPlaying(false);
         setPlayingId(null);
       }
-      
-      // Request permissions
       const { status } = await Audio.requestPermissionsAsync();
       if (status !== 'granted') {
         Alert.alert('Permission Needed', 'Please grant microphone access to send voice messages');
         return;
       }
-      
       await Audio.setAudioModeAsync({
         allowsRecordingIOS: true,
         playsInSilentModeIOS: true,
       });
-      
       const { recording: newRecording } = await Audio.Recording.createAsync(
         Audio.RecordingOptionsPresets.HIGH_QUALITY
       );
-      
       setRecording(newRecording);
       setIsRecording(true);
-      isStoppingRef.current = false; // Reset stopping flag
-      
+      isStoppingRef.current = false;
     } catch (err) {
       console.error('Failed to start recording', err);
       Alert.alert('Error', 'Failed to start recording. Please try again.');
@@ -264,31 +344,20 @@ export default function ChatScreen({ navigation, route }) {
   };
 
   const stopRecording = async () => {
-    // Prevent duplicate calls
-    if (isStoppingRef.current) {
-      console.log('Already stopping recording, ignoring duplicate call');
-      return;
-    }
-    
-    // Don't proceed if there's no recording
+    if (isStoppingRef.current) return;
     if (!recording) {
       setIsRecording(false);
       return;
     }
-    
     isStoppingRef.current = true;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    
     try {
-      // Check if recording exists before stopping
       const recordingStatus = await recording.getStatusAsync();
       if (recordingStatus.isRecording) {
         await recording.stopAndUnloadAsync();
         const uri = recording.getURI();
-        
         setRecording(null);
         setIsRecording(false);
-        
         if (uri) {
           await sendVoiceMessage(uri);
         } else {
@@ -298,7 +367,6 @@ export default function ChatScreen({ navigation, route }) {
         setRecording(null);
         setIsRecording(false);
       }
-      
     } catch (err) {
       console.error('Failed to stop recording', err);
       setRecording(null);
@@ -310,18 +378,18 @@ export default function ChatScreen({ navigation, route }) {
 
   const sendVoiceMessage = async (uri) => {
     if (!chatId) return;
-    
     setSendingImage(true);
     try {
       const response = await fetch(uri);
       const blob = await response.blob();
-      
       const reader = new FileReader();
-      
       reader.onloadend = async () => {
         try {
           const base64String = reader.result;
-          const messagesRef = collection(db, 'chats', chatId, 'messages');
+          const collectionPath = isGroupChat 
+            ? `groupMessages/${chatId}/messages`
+            : `chats/${chatId}/messages`;
+          const messagesRef = collection(db, collectionPath);
           await addDoc(messagesRef, {
             voiceBase64: base64String,
             createdAt: new Date(),
@@ -332,12 +400,8 @@ export default function ChatScreen({ navigation, route }) {
             type: 'voice',
             duration: 0,
           });
-          
           Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-          
-          setTimeout(() => {
-            flatListRef.current?.scrollToEnd({ animated: true });
-          }, 100);
+          setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
         } catch (error) {
           console.error('Error saving voice message:', error);
           Alert.alert('Error', 'Failed to send voice message');
@@ -345,15 +409,12 @@ export default function ChatScreen({ navigation, route }) {
           setSendingImage(false);
         }
       };
-      
       reader.onerror = () => {
         console.error('FileReader error');
         Alert.alert('Error', 'Failed to read voice message');
         setSendingImage(false);
       };
-      
       reader.readAsDataURL(blob);
-      
     } catch (error) {
       console.error('Error sending voice message:', error);
       Alert.alert('Error', 'Failed to send voice message');
@@ -363,37 +424,28 @@ export default function ChatScreen({ navigation, route }) {
 
   const playVoiceMessage = async (base64Uri, messageId) => {
     try {
-      // Stop current playback if any
       if (sound) {
         try {
           await sound.stopAsync();
           await sound.unloadAsync();
-        } catch (e) {
-          // Ignore errors
-        }
+        } catch (e) {}
         setSound(null);
         setIsPlaying(false);
         setPlayingId(null);
       }
-      
-      // If clicking the same message that's playing, just stop
       if (playingId === messageId) {
         setPlayingId(null);
         setIsPlaying(false);
         return;
       }
-      
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-      
       const { sound: newSound } = await Audio.Sound.createAsync(
         { uri: base64Uri },
         { shouldPlay: true }
       );
-      
       setSound(newSound);
       setPlayingId(messageId);
       setIsPlaying(true);
-      
       newSound.setOnPlaybackStatusUpdate((status) => {
         if (status.didJustFinish) {
           setIsPlaying(false);
@@ -401,7 +453,6 @@ export default function ChatScreen({ navigation, route }) {
           newSound.unloadAsync();
         }
       });
-      
     } catch (error) {
       console.error('Error playing voice message:', error);
       Alert.alert('Error', 'Failed to play voice message');
@@ -410,28 +461,20 @@ export default function ChatScreen({ navigation, route }) {
 
   const animateSend = () => {
     Animated.sequence([
-      Animated.timing(sendAnimation, {
-        toValue: 0.8,
-        duration: 100,
-        useNativeDriver: true,
-      }),
-      Animated.timing(sendAnimation, {
-        toValue: 1,
-        duration: 100,
-        useNativeDriver: true,
-      }),
+      Animated.timing(sendAnimation, { toValue: 0.8, duration: 100, useNativeDriver: true }),
+      Animated.timing(sendAnimation, { toValue: 1, duration: 100, useNativeDriver: true }),
     ]).start();
   };
 
   const handleSendMessage = async () => {
     if (!newMessage.trim()) return;
-    
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     animateSend();
-    
     await markAllMessagesAsRead();
-    
-    const messagesRef = collection(db, 'chats', chatId, 'messages');
+    const collectionPath = isGroupChat 
+      ? `groupMessages/${chatId}/messages`
+      : `chats/${chatId}/messages`;
+    const messagesRef = collection(db, collectionPath);
     const messageData = {
       text: newMessage,
       createdAt: new Date(),
@@ -440,7 +483,6 @@ export default function ChatScreen({ navigation, route }) {
       userName: auth.currentUser.email?.split('@')[0],
       read: false,
     };
-    
     if (replyToMsg) {
       messageData.replyTo = {
         id: replyToMsg.id,
@@ -450,45 +492,33 @@ export default function ChatScreen({ navigation, route }) {
       };
       setReplyToMsg(null);
     }
-    
     await addDoc(messagesRef, messageData);
     setNewMessage('');
-    
-    setTimeout(() => {
-      flatListRef.current?.scrollToEnd({ animated: true });
-    }, 100);
+    setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
   };
 
   const handleTyping = async (text) => {
     setNewMessage(text);
-    
+    if (isGroupChat) return; // No typing for groups
     if (text.length > 0 && !isTyping) {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
       setIsTyping(true);
       const typingRef = doc(db, 'typing', chatId);
-      
       try {
-        await setDoc(typingRef, {
-          [auth.currentUser.uid]: true,
-        }, { merge: true });
+        await setDoc(typingRef, { [auth.currentUser.uid]: true }, { merge: true });
       } catch (error) {
         console.error('Error setting typing status:', error);
       }
-      
       if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
       typingTimeoutRef.current = setTimeout(async () => {
         setIsTyping(false);
         const typingRef = doc(db, 'typing', chatId);
-        await updateDoc(typingRef, {
-          [auth.currentUser.uid]: false,
-        });
+        await updateDoc(typingRef, { [auth.currentUser.uid]: false });
       }, 1500);
     } else if (text.length === 0 && isTyping) {
       setIsTyping(false);
       const typingRef = doc(db, 'typing', chatId);
-      await updateDoc(typingRef, {
-        [auth.currentUser.uid]: false,
-      });
+      await updateDoc(typingRef, { [auth.currentUser.uid]: false });
     }
   };
 
@@ -514,13 +544,11 @@ export default function ChatScreen({ navigation, route }) {
         Alert.alert('Permission Needed', 'Please grant gallery access to send images');
         return;
       }
-
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ImagePicker.MediaTypeOptions.Images,
         allowsEditing: true,
         quality: 0.7,
       });
-
       if (!result.canceled && result.assets[0].uri) {
         const compressedUri = await compressImage(result.assets[0].uri);
         await sendImageAsBase64(compressedUri);
@@ -539,12 +567,10 @@ export default function ChatScreen({ navigation, route }) {
         Alert.alert('Permission Needed', 'Please grant camera access');
         return;
       }
-
       const result = await ImagePicker.launchCameraAsync({
         allowsEditing: true,
         quality: 0.7,
       });
-
       if (!result.canceled && result.assets[0].uri) {
         const compressedUri = await compressImage(result.assets[0].uri);
         await sendImageAsBase64(compressedUri);
@@ -560,24 +586,23 @@ export default function ChatScreen({ navigation, route }) {
       Alert.alert('Error', 'Chat not initialized');
       return;
     }
-    
     setSendingImage(true);
     try {
       const response = await fetch(uri);
       const blob = await response.blob();
-      
       if (blob.size > 900000) {
         Alert.alert('Error', 'Image is too large. Please choose a smaller image.');
         setSendingImage(false);
         return;
       }
-      
       const reader = new FileReader();
-      
       reader.onloadend = async () => {
         try {
           const base64String = reader.result;
-          const messagesRef = collection(db, 'chats', chatId, 'messages');
+          const collectionPath = isGroupChat 
+            ? `groupMessages/${chatId}/messages`
+            : `chats/${chatId}/messages`;
+          const messagesRef = collection(db, collectionPath);
           await addDoc(messagesRef, {
             imageBase64: base64String,
             createdAt: new Date(),
@@ -587,13 +612,9 @@ export default function ChatScreen({ navigation, route }) {
             read: false,
             type: 'image',
           });
-          
           Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
           Alert.alert('Success', 'Image sent successfully!');
-          
-          setTimeout(() => {
-            flatListRef.current?.scrollToEnd({ animated: true });
-          }, 100);
+          setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
         } catch (error) {
           console.error('Error saving to Firestore:', error);
           Alert.alert('Error', 'Failed to save image. Please try a smaller image.');
@@ -601,15 +622,12 @@ export default function ChatScreen({ navigation, route }) {
           setSendingImage(false);
         }
       };
-      
       reader.onerror = () => {
         console.error('FileReader error');
         Alert.alert('Error', 'Failed to read image');
         setSendingImage(false);
       };
-      
       reader.readAsDataURL(blob);
-      
     } catch (error) {
       console.error('Error sending image:', error);
       Alert.alert('Error', `Failed to send image: ${error.message}`);
@@ -632,7 +650,10 @@ export default function ChatScreen({ navigation, route }) {
 
   const addReaction = async (messageId, reaction) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    const messageRef = doc(db, 'chats', chatId, 'messages', messageId);
+    const collectionPath = isGroupChat 
+      ? `groupMessages/${chatId}/messages`
+      : `chats/${chatId}/messages`;
+    const messageRef = doc(db, collectionPath, messageId);
     await updateDoc(messageRef, { reaction });
     setSelectedMessage(null);
   };
@@ -648,7 +669,10 @@ export default function ChatScreen({ navigation, route }) {
           text: 'Delete',
           style: 'destructive',
           onPress: async () => {
-            const messageRef = doc(db, 'chats', chatId, 'messages', message.id);
+            const collectionPath = isGroupChat 
+              ? `groupMessages/${chatId}/messages`
+              : `chats/${chatId}/messages`;
+            const messageRef = doc(db, collectionPath, message.id);
             await deleteDoc(messageRef);
             setShowActionSheet(false);
             setSelectedMessage(null);
@@ -665,22 +689,20 @@ export default function ChatScreen({ navigation, route }) {
     setEditText(message.text);
     setShowActionSheet(false);
     setSelectedMessage(null);
-    
-    setTimeout(() => {
-      inputRef.current?.focus();
-    }, 100);
+    setTimeout(() => inputRef.current?.focus(), 100);
   };
 
   const saveEditMessage = async () => {
     if (!editText.trim() || !editingMessage) return;
-    
-    const messageRef = doc(db, 'chats', chatId, 'messages', editingMessage.id);
+    const collectionPath = isGroupChat 
+      ? `groupMessages/${chatId}/messages`
+      : `chats/${chatId}/messages`;
+    const messageRef = doc(db, collectionPath, editingMessage.id);
     await updateDoc(messageRef, {
       text: editText,
       edited: true,
       editedAt: new Date(),
     });
-    
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     setEditingMessage(null);
     setEditText('');
@@ -688,14 +710,16 @@ export default function ChatScreen({ navigation, route }) {
 
   const togglePinMessage = async (message) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    const messageRef = doc(db, 'chats', chatId, 'messages', message.id);
+    const collectionPath = isGroupChat 
+      ? `groupMessages/${chatId}/messages`
+      : `chats/${chatId}/messages`;
+    const messageRef = doc(db, collectionPath, message.id);
     await updateDoc(messageRef, {
       isPinned: !message.isPinned,
       pinnedAt: !message.isPinned ? new Date() : null,
     });
     setShowActionSheet(false);
     setSelectedMessage(null);
-    
     if (!message.isPinned) {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       Alert.alert('Success', 'Message pinned!');
@@ -709,14 +733,15 @@ export default function ChatScreen({ navigation, route }) {
     setReplyToMsg(message);
     setShowActionSheet(false);
     setSelectedMessage(null);
-    setTimeout(() => {
-      inputRef.current?.focus();
-    }, 100);
+    setTimeout(() => inputRef.current?.focus(), 100);
   };
 
   const bumpToBottom = async (message) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    const messageRef = doc(db, 'chats', chatId, 'messages', message.id);
+    const collectionPath = isGroupChat 
+      ? `groupMessages/${chatId}/messages`
+      : `chats/${chatId}/messages`;
+    const messageRef = doc(db, collectionPath, message.id);
     await updateDoc(messageRef, {
       bumpedAt: new Date(),
       bumped: true,
@@ -724,22 +749,18 @@ export default function ChatScreen({ navigation, route }) {
     setShowActionSheet(false);
     setSelectedMessage(null);
     Alert.alert('Success', 'Message bumped to bottom!');
-    
-    setTimeout(() => {
-      flatListRef.current?.scrollToEnd({ animated: true });
-    }, 100);
+    setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
   };
 
-  const cancelReply = () => {
-    setReplyToMsg(null);
-  };
-
+  const cancelReply = () => setReplyToMsg(null);
   const cancelEdit = () => {
     setEditingMessage(null);
     setEditText('');
   };
 
   const showMessageActions = (message) => {
+    // Do not show actions for system messages
+    if (message.type === 'system') return;
     setSelectedMessage(message);
     setShowActionSheet(true);
   };
@@ -750,8 +771,9 @@ export default function ChatScreen({ navigation, route }) {
     setShowImageViewer(true);
   };
 
-  // Swipeable right actions (Delete/Reply)
   const renderRightActions = (message) => {
+    // No swipe actions for system messages
+    if (message.type === 'system') return <View />;
     return (
       <View style={styles.rightActionsContainer}>
         <TouchableOpacity 
@@ -804,7 +826,6 @@ export default function ChatScreen({ navigation, route }) {
                 <Ionicons name="close" size={24} color="#fff" />
               </TouchableOpacity>
             </View>
-            
             {pinnedMessages.length === 0 ? (
               <View style={styles.noPinnedContainer}>
                 <Ionicons name="pin-outline" size={50} color="#666" />
@@ -838,22 +859,20 @@ export default function ChatScreen({ navigation, route }) {
                         ) : (
                           <View style={styles.pinnedFriendAvatar}>
                             <Text style={styles.pinnedAvatarText}>
-                              {friend?.username?.[0]?.toUpperCase()}
+                              {isGroupChat ? 'G' : chatPartner?.username?.[0]?.toUpperCase()}
                             </Text>
                           </View>
                         )}
                       </View>
-                      
                       <View style={styles.pinnedMessageContent}>
                         <View style={styles.pinnedMessageHeader}>
                           <Text style={styles.pinnedMessageSender}>
-                            {isMyMessage ? 'You' : friend.username}
+                            {isMyMessage ? 'You' : (item.userName || 'User')}
                           </Text>
                           <Text style={styles.pinnedMessageTime}>
                             {new Date(item.createdAt).toLocaleString()}
                           </Text>
                         </View>
-                        
                         {item.replyTo && (
                           <View style={styles.pinnedReplyPreview}>
                             <Ionicons name="return-up-back" size={12} color="#888" />
@@ -862,25 +881,9 @@ export default function ChatScreen({ navigation, route }) {
                             </Text>
                           </View>
                         )}
-                        
                         {item.imageBase64 ? (
                           <View style={styles.pinnedImageContainer}>
-                            <ExpoImage 
-                              source={{ uri: item.imageBase64 }} 
-                              style={styles.pinnedMessageImage}
-                              contentFit="cover"
-                              transition={300}
-                            />
-                            <Text style={styles.pinnedImageLabel}>📷 Image</Text>
-                          </View>
-                        ) : item.imageUrl ? (
-                          <View style={styles.pinnedImageContainer}>
-                            <ExpoImage 
-                              source={{ uri: item.imageUrl }} 
-                              style={styles.pinnedMessageImage}
-                              contentFit="cover"
-                              transition={300}
-                            />
+                            <ExpoImage source={{ uri: item.imageBase64 }} style={styles.pinnedMessageImage} contentFit="cover" transition={300} />
                             <Text style={styles.pinnedImageLabel}>📷 Image</Text>
                           </View>
                         ) : item.voiceBase64 ? (
@@ -894,21 +897,19 @@ export default function ChatScreen({ navigation, route }) {
                             {item.edited && <Text style={styles.pinnedEditedText}> (edited)</Text>}
                           </Text>
                         )}
-                        
                         {item.reaction && (
                           <View style={styles.pinnedReactionBadge}>
                             <Text style={styles.pinnedReactionText}>Reaction: {item.reaction}</Text>
                           </View>
                         )}
                       </View>
-                      
                       <TouchableOpacity 
                         onPress={async () => {
-                          const messageRef = doc(db, 'chats', chatId, 'messages', item.id);
-                          await updateDoc(messageRef, {
-                            isPinned: false,
-                            pinnedAt: null,
-                          });
+                          const collectionPath = isGroupChat 
+                            ? `groupMessages/${chatId}/messages`
+                            : `chats/${chatId}/messages`;
+                          const messageRef = doc(db, collectionPath, item.id);
+                          await updateDoc(messageRef, { isPinned: false, pinnedAt: null });
                           Alert.alert('Unpinned', 'Message removed from pinned');
                         }}
                         style={styles.unpinButton}
@@ -929,7 +930,6 @@ export default function ChatScreen({ navigation, route }) {
 
   const renderReplyPreview = () => {
     if (!replyToMsg) return null;
-    
     return (
       <View style={styles.replyPreview}>
         <View style={styles.replyPreviewContent}>
@@ -950,7 +950,6 @@ export default function ChatScreen({ navigation, route }) {
 
   const renderEditInput = () => {
     if (!editingMessage) return null;
-    
     return (
       <View style={styles.editContainer}>
         <View style={styles.editPreview}>
@@ -976,20 +975,13 @@ export default function ChatScreen({ navigation, route }) {
     );
   };
 
-  // Animated Read Receipts Component
   const AnimatedCheckmark = ({ seen }) => {
     const scale = useRef(new Animated.Value(0)).current;
-    
     useEffect(() => {
       if (seen) {
-        Animated.spring(scale, {
-          toValue: 1,
-          friction: 5,
-          useNativeDriver: true,
-        }).start();
+        Animated.spring(scale, { toValue: 1, friction: 5, useNativeDriver: true }).start();
       }
     }, [seen]);
-    
     return (
       <Animated.View style={{ transform: [{ scale }] }}>
         <Ionicons name="checkmark-done" size={14} color="#4CD964" />
@@ -998,6 +990,15 @@ export default function ChatScreen({ navigation, route }) {
   };
 
   const renderMessage = ({ item }) => {
+    // System message (someone left the group)
+    if (item.type === 'system') {
+      return (
+        <View style={styles.systemMessageContainer}>
+          <Text style={styles.systemMessageText}>{item.text}</Text>
+        </View>
+      );
+    }
+
     const isMyMessage = item.userId === auth.currentUser?.uid;
     const isFirstUnread = showNewMessageDivider && item.id === firstUnreadMessageId;
     const isPlayingThis = playingId === item.id;
@@ -1016,25 +1017,25 @@ export default function ChatScreen({ navigation, route }) {
               <View style={styles.dividerLine} />
             </View>
           )}
-          
           <View style={[styles.messageRow, isMyMessage && styles.myMessageRow]}>
-            {!isMyMessage && (
+            {!isMyMessage && !isGroupChat && (
               <View style={styles.messageAvatarContainer}>
-                {friend?.avatarUrl ? (
-                  <ExpoImage 
-                    source={{ uri: friend.avatarUrl }} 
-                    style={styles.messageAvatar}
-                    contentFit="cover"
-                    transition={300}
-                  />
+                {chatPartner?.avatarUrl ? (
+                  <ExpoImage source={{ uri: chatPartner.avatarUrl }} style={styles.messageAvatar} contentFit="cover" transition={300} />
                 ) : (
                   <View style={styles.messageAvatarPlaceholder}>
-                    <Text style={styles.messageAvatarText}>{friend?.username?.[0]?.toUpperCase()}</Text>
+                    <Text style={styles.messageAvatarText}>{chatPartner?.username?.[0]?.toUpperCase()}</Text>
                   </View>
                 )}
               </View>
             )}
-            
+            {!isMyMessage && isGroupChat && (
+              <View style={styles.messageAvatarContainer}>
+                <View style={styles.messageAvatarPlaceholderGroup}>
+                  <Text style={styles.messageAvatarText}>{item.userName?.[0]?.toUpperCase()}</Text>
+                </View>
+              </View>
+            )}
             <TouchableOpacity 
               style={[styles.messageWrapper, isMyMessage && styles.myMessageWrapper]}
               onLongPress={() => showMessageActions(item)}
@@ -1052,18 +1053,18 @@ export default function ChatScreen({ navigation, route }) {
                     <Text style={styles.pinText}>Pinned</Text>
                   </View>
                 )}
-                
                 {item.bumped && !item.isPinned && (
                   <View style={styles.bumpBadge}>
                     <Ionicons name="arrow-down" size={10} color="#4CD964" />
                     <Text style={styles.bumpText}>Bumped</Text>
                   </View>
                 )}
-                
-                {!isMyMessage && (
+                {!isMyMessage && !isGroupChat && (
                   <Text style={styles.userName}>{item.userName}</Text>
                 )}
-                
+                {!isMyMessage && isGroupChat && (
+                  <Text style={styles.userName}>{item.userName}</Text>
+                )}
                 {item.replyTo && (
                   <View style={styles.replyToPreview}>
                     <Ionicons name="return-up-back" size={12} color="#888" />
@@ -1075,30 +1076,14 @@ export default function ChatScreen({ navigation, route }) {
                     </View>
                   </View>
                 )}
-                
-                {/* Image Message */}
                 {item.imageBase64 && (
                   <TouchableOpacity onPress={() => handleImagePress(item.imageBase64)}>
-                    <ExpoImage 
-                      source={{ uri: item.imageBase64 }} 
-                      style={styles.messageImage}
-                      contentFit="cover"
-                      transition={300}
-                    />
+                    <ExpoImage source={{ uri: item.imageBase64 }} style={styles.messageImage} contentFit="cover" transition={300} />
                   </TouchableOpacity>
                 )}
-                
-                {/* Voice Message */}
                 {item.voiceBase64 && (
-                  <TouchableOpacity 
-                    style={styles.voiceMessageContainer}
-                    onPress={() => playVoiceMessage(item.voiceBase64, item.id)}
-                  >
-                    <Ionicons 
-                      name={isPlayingThis ? "pause-circle" : "play-circle"} 
-                      size={32} 
-                      color={isMyMessage ? "#121212" : "#4CD964"} 
-                    />
+                  <TouchableOpacity style={styles.voiceMessageContainer} onPress={() => playVoiceMessage(item.voiceBase64, item.id)}>
+                    <Ionicons name={isPlayingThis ? "pause-circle" : "play-circle"} size={32} color={isMyMessage ? "#121212" : "#4CD964"} />
                     <View style={styles.voiceWaveform}>
                       <View style={[styles.waveBar, { height: 15 }]} />
                       <View style={[styles.waveBar, { height: 25 }]} />
@@ -1106,33 +1091,22 @@ export default function ChatScreen({ navigation, route }) {
                       <View style={[styles.waveBar, { height: 25 }]} />
                       <View style={[styles.waveBar, { height: 15 }]} />
                     </View>
-                    <Text style={[styles.voiceText, isMyMessage && styles.myMessageText]}>
-                      Voice message
-                    </Text>
+                    <Text style={[styles.voiceText, isMyMessage && styles.myMessageText]}>Voice message</Text>
                   </TouchableOpacity>
                 )}
-                
-                {/* Text Message */}
                 {!item.imageBase64 && !item.voiceBase64 && (
                   <Text style={[styles.messageText, isMyMessage && styles.myMessageText]}>
                     {item.text}
                     {item.edited && <Text style={styles.editedText}> (edited)</Text>}
                   </Text>
                 )}
-                
                 <View style={styles.messageFooter}>
                   <Text style={[styles.timeText, isMyMessage && styles.myTimeText]}>
                     {new Date(item.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                   </Text>
-                  {item.reaction && (
-                    <Text style={styles.reactionBadge}>{item.reaction}</Text>
-                  )}
-                  {isMyMessage && item.read && (
-                    <AnimatedCheckmark seen={true} />
-                  )}
-                  {isMyMessage && !item.read && (
-                    <Ionicons name="checkmark" size={14} color="rgba(255,255,255,0.5)" />
-                  )}
+                  {item.reaction && <Text style={styles.reactionBadge}>{item.reaction}</Text>}
+                  {isMyMessage && item.read && <AnimatedCheckmark seen={true} />}
+                  {isMyMessage && !item.read && <Ionicons name="checkmark" size={14} color="rgba(255,255,255,0.5)" />}
                 </View>
               </View>
             </TouchableOpacity>
@@ -1142,35 +1116,20 @@ export default function ChatScreen({ navigation, route }) {
     );
   };
 
-  // Image Viewer Modal
   const renderImageViewer = () => {
     if (!showImageViewer) return null;
-    
     return (
-      <Modal
-        visible={showImageViewer}
-        transparent={true}
-        animationType="fade"
-        onRequestClose={() => setShowImageViewer(false)}
-      >
+      <Modal visible={showImageViewer} transparent={true} animationType="fade" onRequestClose={() => setShowImageViewer(false)}>
         <View style={styles.imageViewerContainer}>
-          <TouchableOpacity 
-            style={styles.imageViewerClose}
-            onPress={() => setShowImageViewer(false)}
-          >
+          <TouchableOpacity style={styles.imageViewerClose} onPress={() => setShowImageViewer(false)}>
             <Ionicons name="close" size={30} color="#fff" />
           </TouchableOpacity>
-          <ExpoImage 
-            source={{ uri: selectedImageUrl }} 
-            style={styles.fullScreenImage}
-            contentFit="contain"
-          />
+          <ExpoImage source={{ uri: selectedImageUrl }} style={styles.fullScreenImage} contentFit="contain" />
         </View>
       </Modal>
     );
   };
 
-  // Animated Typing Indicator Component
   const TypingIndicator = () => (
     <View style={styles.typingIndicatorContainer}>
       <View style={styles.typingIndicatorBubble}>
@@ -1178,11 +1137,10 @@ export default function ChatScreen({ navigation, route }) {
         <Animated.View style={[styles.typingDot, { transform: [{ scale: dot2 }] }]} />
         <Animated.View style={[styles.typingDot, { transform: [{ scale: dot3 }] }]} />
       </View>
-      <Text style={styles.typingIndicatorText}>{friend.username} is typing...</Text>
+      <Text style={styles.typingIndicatorText}>{chatPartner.username} is typing...</Text>
     </View>
   );
 
-  // Recording Indicator (without stop button to prevent duplicate calls)
   const RecordingIndicator = () => (
     <View style={styles.recordingContainer}>
       <Animated.View style={[styles.recordingDot, { opacity: recordingAnimation }]} />
@@ -1201,44 +1159,53 @@ export default function ChatScreen({ navigation, route }) {
         <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
           <Ionicons name="arrow-back" size={24} color="#4CD964" />
         </TouchableOpacity>
-        
         <View style={styles.headerInfo}>
-          {friend?.avatarUrl ? (
-            <ExpoImage 
-              source={{ uri: friend.avatarUrl }} 
-              style={styles.headerAvatar}
-              contentFit="cover"
-              transition={300}
-            />
+          {isGroupChat ? (
+            <View style={styles.headerAvatarPlaceholderGroup}>
+              <Ionicons name="people" size={22} color="#121212" />
+            </View>
+          ) : chatPartner?.avatarUrl ? (
+            <ExpoImage source={{ uri: chatPartner.avatarUrl }} style={styles.headerAvatar} contentFit="cover" transition={300} />
           ) : (
             <View style={styles.headerAvatarPlaceholder}>
-              <Text style={styles.headerAvatarText}>{friend?.username?.[0]?.toUpperCase()}</Text>
+              <Text style={styles.headerAvatarText}>{chatPartner?.username?.[0]?.toUpperCase()}</Text>
             </View>
           )}
           <View style={styles.headerTextContainer}>
-            <Text style={styles.headerTitle}>{friend.username}</Text>
-            {otherUserTyping && (
-              <Text style={styles.typingStatus}>✍️ typing...</Text>
-            )}
+            <Text style={styles.headerTitle}>{isGroupChat ? chatPartner.name : chatPartner.username}</Text>
+            {!isGroupChat && otherUserTyping && <Text style={styles.typingStatus}>✍️ typing...</Text>}
+            {!isGroupChat && !otherUserTyping && friendOnline && <Text style={styles.onlineStatus}>● Online</Text>}
           </View>
         </View>
-        
         <View style={styles.headerButtons}>
-          <TouchableOpacity onPress={() => setShowPinnedMessages(true)} style={styles.pinListButton}>
-            <Ionicons name="pin" size={22} color="#FF9800" />
-            {pinnedMessages.length > 0 && (
-              <View style={styles.pinBadgeCount}>
-                <Text style={styles.pinBadgeCountText}>{pinnedMessages.length}</Text>
-              </View>
-            )}
-          </TouchableOpacity>
-          <TouchableOpacity onPress={showImageOptions} style={styles.imageButton}>
-            <Ionicons name="image-outline" size={24} color="#4CD964" />
-          </TouchableOpacity>
-        </View>
+  <TouchableOpacity onPress={() => setShowPinnedMessages(true)} style={styles.pinListButton}>
+    <Ionicons name="pin" size={22} color="#FF9800" />
+    {pinnedMessages.length > 0 && (
+      <View style={styles.pinBadgeCount}>
+        <Text style={styles.pinBadgeCountText}>{pinnedMessages.length}</Text>
+      </View>
+    )}
+  </TouchableOpacity>
+  <TouchableOpacity onPress={showImageOptions} style={styles.imageButton}>
+    <Ionicons name="image-outline" size={24} color="#4CD964" />
+  </TouchableOpacity>
+  {isGroupChat && (
+    <>
+      <TouchableOpacity 
+        onPress={() => navigation.navigate('AddMember', { groupId: chatId, groupName: chatPartner.name })} 
+        style={styles.menuButton}
+      >
+        <Ionicons name="person-add-outline" size={24} color="#4CD964" />
+      </TouchableOpacity>
+      <TouchableOpacity onPress={leaveGroup} style={styles.menuButton}>
+        <Ionicons name="ellipsis-vertical" size={22} color="#FF6B6B" />
+      </TouchableOpacity>
+    </>
+  )}
+</View>
       </View>
 
-      {otherUserTyping && <TypingIndicator />}
+      {!isGroupChat && otherUserTyping && <TypingIndicator />}
       {isRecording && <RecordingIndicator />}
 
       {sendingImage && (
@@ -1257,43 +1224,28 @@ export default function ChatScreen({ navigation, route }) {
         renderItem={renderMessage}
         keyExtractor={(item) => item.id}
         contentContainerStyle={styles.messagesList}
-        onContentSizeChange={() => {
-          if (messages.length > 0) {
-            flatListRef.current?.scrollToEnd({ animated: false });
-          }
-        }}
-        onLayout={() => {
-          if (messages.length > 0) {
-            flatListRef.current?.scrollToEnd({ animated: false });
-          }
-        }}
+        onContentSizeChange={() => messages.length > 0 && flatListRef.current?.scrollToEnd({ animated: false })}
+        onLayout={() => messages.length > 0 && flatListRef.current?.scrollToEnd({ animated: false })}
       />
 
       <View style={styles.inputContainer}>
         <TouchableOpacity 
           style={[styles.micButton, isRecording && styles.micButtonActive]} 
           onPressIn={startRecording}
-          onPressOut={() => {
-            // Only stop if we're actually recording
-            if (isRecording && recording) {
-              stopRecording();
-            }
-          }}
+          onPressOut={() => { if (isRecording && recording) stopRecording(); }}
           activeOpacity={0.7}
         >
           <Ionicons name="mic" size={24} color={isRecording ? "#FF3B30" : "#4CD964"} />
         </TouchableOpacity>
-        
         <TextInput
           ref={inputRef}
           style={styles.input}
           value={newMessage}
           onChangeText={handleTyping}
-          placeholder={replyToMsg ? `Reply to ${replyToMsg.userName}...` : "Type a message..."}
+          placeholder={replyToMsg ? `Reply to ${replyToMsg.userName}...` : (isGroupChat ? "Type a message to the group..." : "Type a message...")}
           placeholderTextColor="#888"
           multiline
         />
-        
         <Animated.View style={{ transform: [{ scale: sendAnimation }] }}>
           <TouchableOpacity 
             style={[styles.sendButton, !newMessage.trim() && styles.sendButtonDisabled]} 
@@ -1306,53 +1258,35 @@ export default function ChatScreen({ navigation, route }) {
       </View>
 
       {/* Message Actions Modal */}
-      <Modal
-        visible={showActionSheet}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setShowActionSheet(false)}
-      >
-        <TouchableOpacity 
-          style={styles.modalOverlay} 
-          activeOpacity={1} 
-          onPress={() => setShowActionSheet(false)}
-        >
+      <Modal visible={showActionSheet} transparent animationType="fade" onRequestClose={() => setShowActionSheet(false)}>
+        <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={() => setShowActionSheet(false)}>
           <View style={styles.actionSheet}>
             <Text style={styles.actionSheetTitle}>Message Actions</Text>
-            
             {selectedMessage?.userId === auth.currentUser?.uid && (
               <>
                 <TouchableOpacity style={styles.actionItem} onPress={() => editMessage(selectedMessage)}>
                   <Ionicons name="create-outline" size={24} color="#4CD964" />
                   <Text style={styles.actionText}>Edit</Text>
                 </TouchableOpacity>
-                
                 <TouchableOpacity style={styles.actionItem} onPress={() => deleteMessage(selectedMessage)}>
                   <Ionicons name="trash-outline" size={24} color="#FF6B6B" />
                   <Text style={[styles.actionText, styles.deleteText]}>Delete</Text>
                 </TouchableOpacity>
               </>
             )}
-            
             <TouchableOpacity style={styles.actionItem} onPress={() => handleReplyToMessage(selectedMessage)}>
               <Ionicons name="return-up-back-outline" size={24} color="#4CD964" />
               <Text style={styles.actionText}>Reply</Text>
             </TouchableOpacity>
-            
             <TouchableOpacity style={styles.actionItem} onPress={() => togglePinMessage(selectedMessage)}>
               <Ionicons name="pin-outline" size={24} color="#FF9800" />
-              <Text style={styles.actionText}>
-                {selectedMessage?.isPinned ? 'Unpin' : 'Pin'}
-              </Text>
+              <Text style={styles.actionText}>{selectedMessage?.isPinned ? 'Unpin' : 'Pin'}</Text>
             </TouchableOpacity>
-            
             <TouchableOpacity style={styles.actionItem} onPress={() => bumpToBottom(selectedMessage)}>
               <Ionicons name="arrow-down-outline" size={24} color="#4CD964" />
               <Text style={styles.actionText}>Bump to Bottom</Text>
             </TouchableOpacity>
-            
             <View style={styles.actionDivider} />
-            
             <TouchableOpacity style={styles.actionItem} onPress={() => setShowActionSheet(false)}>
               <Ionicons name="close-outline" size={24} color="#888" />
               <Text style={styles.actionText}>Cancel</Text>
@@ -1362,24 +1296,11 @@ export default function ChatScreen({ navigation, route }) {
       </Modal>
 
       {/* Reaction Modal */}
-      <Modal
-        visible={!!selectedMessage && !showActionSheet}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setSelectedMessage(null)}
-      >
-        <TouchableOpacity 
-          style={styles.modalOverlay} 
-          activeOpacity={1} 
-          onPress={() => setSelectedMessage(null)}
-        >
+      <Modal visible={!!selectedMessage && !showActionSheet} transparent animationType="fade" onRequestClose={() => setSelectedMessage(null)}>
+        <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={() => setSelectedMessage(null)}>
           <View style={styles.reactionsContainer}>
             {reactions.map((reaction) => (
-              <TouchableOpacity
-                key={reaction}
-                onPress={() => addReaction(selectedMessage.id, reaction)}
-                style={styles.reactionButton}
-              >
+              <TouchableOpacity key={reaction} onPress={() => addReaction(selectedMessage.id, reaction)} style={styles.reactionButton}>
                 <Text style={styles.reactionEmoji}>{reaction}</Text>
               </TouchableOpacity>
             ))}
@@ -1423,6 +1344,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 8,
   },
+  menuButton: {
+    padding: 6,
+    marginRight: -6,
+  },
   pinListButton: {
     padding: 6,
     position: 'relative',
@@ -1459,6 +1384,15 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginRight: 10,
   },
+  headerAvatarPlaceholderGroup: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#FF9800',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 10,
+  },
   headerAvatarText: {
     fontSize: 16,
     color: '#121212',
@@ -1476,6 +1410,12 @@ const styles = StyleSheet.create({
     fontSize: 10,
     color: '#4CD964',
     fontStyle: 'italic',
+    marginTop: 2,
+  },
+  onlineStatus: {
+    fontSize: 10,
+    color: '#4CD964',
+    fontWeight: '500',
     marginTop: 2,
   },
   imageButton: {
@@ -1534,8 +1474,9 @@ const styles = StyleSheet.create({
     color: '#FF3B30',
     fontWeight: '500',
   },
-  stopRecordingButton: {
-    padding: 4,
+  recordingHint: {
+    fontSize: 12,
+    color: '#888',
   },
   sendingContainer: {
     flexDirection: 'row',
@@ -1577,6 +1518,14 @@ const styles = StyleSheet.create({
     height: 32,
     borderRadius: 16,
     backgroundColor: '#4CD964',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  messageAvatarPlaceholderGroup: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#FF9800',
     justifyContent: 'center',
     alignItems: 'center',
   },
@@ -2064,7 +2013,6 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginTop: 8,
   },
-  // Swipe Actions Styles
   rightActionsContainer: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -2090,7 +2038,6 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     marginTop: 4,
   },
-  // Image Viewer Styles
   imageViewerContainer: {
     flex: 1,
     backgroundColor: '#000000',
@@ -2109,5 +2056,21 @@ const styles = StyleSheet.create({
   fullScreenImage: {
     width: width,
     height: height,
+  },
+  // System message styles
+  systemMessageContainer: {
+    alignItems: 'center',
+    marginVertical: 8,
+  },
+  systemMessageText: {
+    fontSize: 12,
+    color: '#888888',
+    fontStyle: 'italic',
+    textAlign: 'center',
+    backgroundColor: 'rgba(0,0,0,0.3)',
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    borderRadius: 12,
+    overflow: 'hidden',
   },
 });
